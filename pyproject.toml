@@ -16,9 +16,7 @@ keywords = ["zeromem", "zerozonex", "memory", "llm", "ollama", "qwen", "mcp", "s
 dependencies = []
 
 [project.urls]
-Homepage = "https://zerozonex.com"
 Repository = "https://github.com/IMLIULIAN/zeromem"
-Documentation = "https://mem.zerozonex.com"
 ModelHub = "https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2"
 ModelScope = "https://modelscope.cn/models/IMLIULIAN/qwen3.5-4b-memory-v2"
 

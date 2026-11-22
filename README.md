@@ -4,8 +4,8 @@
 
 # ZeroMem（零忆）
 
-> **by [ZeroZoneX](https://zerozonex.com) · 面向开源模型 [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2) 的轻量本地记忆引擎**  
-> 作者：**B站IM榴莲 (IMLIULIAN)** · 文档：`https://mem.zerozonex.com` · Apache-2.0（兼容原 `v2-memory` / `v2mem` 命令与导入）
+> **by ZeroZoneX · 面向开源模型 [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2) 的轻量本地记忆引擎**  
+> 作者：**B站IM榴莲 (IMLIULIAN)** · Apache-2.0（兼容原 `v2-memory` / `v2mem` 命令与导入）
 
 项目围绕尽量简单的本地部署做了四项克制取舍：**无第三方 Python 依赖**（仅用 Python 3.9+ 标准库，含 MCP stdio 服务）、**无外部向量库与 Embedding 模型**（单个 SQLite 文件 + 双轨 FTS5）、**写入阶段不消耗云端 API**（由本地 4B 模型完成抽取与写前审校）、**入库前双层凭据脱敏**（常见密钥自动替换为 `[REDACTED]`，降低云端外泄风险）。
 
@@ -252,5 +252,5 @@ python -m unittest discover -s tests -p "test_live_v2.py" -v
 ## 许可与署名
 
 - 协议：**Apache License 2.0**（详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
-- 作者：**B站IM榴莲 (IMLIULIAN)** · **ZeroZoneX**（[zerozonex.com](https://zerozonex.com) / [mem.zerozonex.com](https://mem.zerozonex.com)）
+- 作者：**B站IM榴莲 (IMLIULIAN)** · **ZeroZoneX**
 - 配套模型：[`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2)（衍生自 `Qwen/Qwen3.5-4B`）

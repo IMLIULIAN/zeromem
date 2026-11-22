@@ -4,8 +4,8 @@
 
 # ZeroMem (零忆)
 
-> **by [ZeroZoneX](https://zerozonex.com) · A Lightweight Local Memory Engine for [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2)**  
-> Created by **B站IM榴莲 (IMLIULIAN)** · Docs: `https://mem.zerozonex.com` · Apache-2.0 (backward-compatible with `v2-memory` / `v2mem` CLI & imports)
+> **by ZeroZoneX · A Lightweight Local Memory Engine for [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2)**  
+> Created by **B站IM榴莲 (IMLIULIAN)** · Apache-2.0 (backward-compatible with `v2-memory` / `v2mem` CLI & imports)
 
 ZeroMem is built around four simple engineering constraints to keep local setup minimal: **no third-party Python dependencies** (Python 3.9+ stdlib only, including the MCP stdio server), **no external vector DB or embedding model** (single SQLite file with dual-track FTS5), **no cloud API cost on write** (local 4B extraction and pre-write admission), and **local credential redaction** before persistence (`[REDACTED]`).
 
@@ -249,5 +249,5 @@ python -m unittest discover -s tests -p "test_live_v2.py" -v
 ## License & Attribution
 
 - **License**: **Apache License 2.0** (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
-- **Author**: **B站IM榴莲 (IMLIULIAN)** · **ZeroZoneX** ([zerozonex.com](https://zerozonex.com) / [mem.zerozonex.com](https://mem.zerozonex.com))
+- **Author**: **B站IM榴莲 (IMLIULIAN)** · **ZeroZoneX**
 - **Companion Model**: [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2) (derived from `Qwen/Qwen3.5-4B`)
