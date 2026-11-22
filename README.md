@@ -1,3 +1,7 @@
+<p align="right">
+  <strong>简体中文</strong> | <a href="README_EN.md">English</a>
+</p>
+
 # ZeroMem（零忆）
 
 > **by [ZeroZoneX](https://zerozonex.com) · 专为开源模型 [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2) 打造的四零本地记忆引擎**  
@@ -210,6 +214,8 @@ zeromem/
 ├── install.ps1             # Windows 双方案一键安装脚本（-Mode fast | mcp）
 ├── install.sh              # macOS / Linux 双方案一键安装脚本（--mode fast | mcp）
 ├── pyproject.toml          # 零第三方依赖打包配置（导出 zmem / zmem-hud 及 v2mem 兼容别名）
+├── README.md               # 中文主文档
+├── README_EN.md            # English Documentation
 ├── zeromem/                # ZeroMem 公开导入与模块入口（python -m zeromem）
 ├── v2mem/                  # 核心实现（保留向后兼容）
 │   ├── contracts.py        # V2 原生双合同、短窗切块器、确定性规则守卫与截断抢救
