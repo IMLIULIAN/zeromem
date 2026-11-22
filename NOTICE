@@ -1,0 +1,13 @@
+ZeroMem (零忆) by ZeroZoneX (https://zerozonex.com)
+Copyright 2026 B站IM榴莲 (IMLIULIAN)
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This project (ZeroMem / legacy package alias v2-memory) is designed as a
+zero-dependency local memory engine paired with Qwen3.5-4B-Memory-V2
+(https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2), which is a derivative
+work based on Qwen/Qwen3.5-4B (Apache-2.0).

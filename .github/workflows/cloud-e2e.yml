@@ -1,0 +1,244 @@
+name: Cloud E2E Verification
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      quant:
+        description: "V2 quantization to test on cloud runner (auto picks per hardware)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - q4_k_m
+          - q8_0
+
+jobs:
+  install-and-unit:
+    name: "Install & Unit (${{ matrix.os }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run offline zero-dependency unit tests & integrity guards
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys
+          sys.path.insert(0, os.getcwd())
+          import zeromem, v2mem
+          from v2mem.contracts import _GENERIC_BEARER_WORDS
+          from v2mem.store import APP_FORMAT_ID, SCHEMA_SIG
+
+          # 1. Alias & hidden watermark integrity
+          assert zeromem.Memory is v2mem.Memory
+          assert "".join(w[0] for w in _GENERIC_BEARER_WORDS[:9]) == "imliulian"
+          assert APP_FORMAT_ID == 0x494D4C4C
+          assert SCHEMA_SIG == "42e7ab99494de6a6b4e88eb2"
+
+          # 2. POSIX installer must be pure LF without UTF-8 BOM
+          sh_bytes = pathlib.Path("install.sh").read_bytes()
+          assert not sh_bytes.startswith(b"\xef\xbb\xbf"), "install.sh must not have UTF-8 BOM"
+          assert b"\r\n" not in sh_bytes, "install.sh must use pure LF line endings"
+
+          # 3. Full offline zero-dependency test suite
+          proc = subprocess.run(
+              [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_core.py", "-v"],
+              check=False,
+          )
+          raise SystemExit(proc.returncode)
+
+      - name: Test POSIX one-command installer & CLI (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n ./install.sh
+          ./install.sh --skip-setup --mode mcp
+
+          ZMEM="$HOME/.local/bin/zmem"
+          V2MEM="$HOME/.local/bin/v2mem"
+          test -x "$ZMEM"
+          test -x "$V2MEM"
+          test -x "$HOME/.local/bin/zmem-hud"
+          test -x "$HOME/.local/bin/v2mem-hud"
+
+          "$ZMEM" --db /tmp/ci_posix.db stats
+          "$V2MEM" --db /tmp/ci_posix.db stats
+          "$ZMEM" --db /tmp/ci_posix.db doctor --json > /tmp/ci_doctor.json
+          "$ZMEM" --db /tmp/ci_posix.db config --mode fast --write-dir /tmp/ci_cfg_fast --json > /tmp/ci_cfg_fast.json
+          "$ZMEM" --db /tmp/ci_posix.db config --mode mcp --write-dir /tmp/ci_cfg_mcp --json > /tmp/ci_cfg_mcp.json
+          "$ZMEM" connect --list --json > /tmp/ci_clients.json
+          "$ZMEM" connect --project-rules /tmp/ci_proj
+
+          python3 - <<'PY'
+          import json, pathlib, platform
+
+          expected_os = platform.system()
+          doc = json.loads(pathlib.Path("/tmp/ci_doctor.json").read_text(encoding="utf-8"))
+          hw = doc["hardware"]
+          print("Hardware probe:", hw)
+          assert hw["os_name"] == expected_os, hw
+          assert hw["ram_gb"] > 0, hw
+          assert hw["recommend_quant"] in ("q8_0", "q4_k_m"), hw
+          assert hw["recommend_num_ctx"] in (4096, 8192), hw
+          if expected_os == "Darwin" and platform.machine().lower() in ("arm64", "aarch64"):
+              assert hw["gpu_vendor"] == "apple", hw
+
+          clients = json.loads(pathlib.Path("/tmp/ci_clients.json").read_text(encoding="utf-8"))
+          assert len(clients) == 7, clients
+          cd = next(c for c in clients if c["id"] == "claude-desktop")
+          if expected_os == "Darwin":
+              assert "Library/Application Support/Claude" in cd["config_path"], cd
+          else:
+              assert ".config/Claude" in cd["config_path"], cd
+
+          assert pathlib.Path("/tmp/ci_cfg_fast/fast_sdk_example.py").is_file()
+          assert pathlib.Path("/tmp/ci_cfg_mcp/mcp_config.json").is_file()
+          assert pathlib.Path("/tmp/ci_cfg_mcp/dsh_mcp_patch.yml").is_file()
+          assert pathlib.Path("/tmp/ci_cfg_mcp/MCP_SYSTEM_PROMPT.md").is_file()
+          assert pathlib.Path("/tmp/ci_proj/.cursor/rules/zeromem.mdc").is_file()
+          assert "zeromem:begin" in pathlib.Path("/tmp/ci_proj/AGENTS.md").read_text(encoding="utf-8")
+          print(f"[OK] {expected_os} installer + hardware + 7 connectors + dual-mode templates verified.")
+          PY
+
+      - name: Test Windows one-command installer & CLI (install.ps1)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PYTHONUTF8 = "1"
+          $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+          # 1. PowerShell AST syntax check
+          $tokens = $null; $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path ".\install.ps1"), [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+          }
+
+          # 2. Run one-command installer
+          $env:ZEROMEM_NO_PATH = "1"
+          ./install.ps1 -SkipSetup -Mode mcp
+
+          $scripts = Join-Path $env:USERPROFILE ".zeromem\venv\Scripts"
+          $zmem = Join-Path $scripts "zmem"
+          $v2mem = Join-Path $scripts "v2mem"
+          $dbPath = Join-Path $env:TEMP "ci_win.db"
+          $docPath = Join-Path $env:TEMP "ci_win_doctor.json"
+          $clientsPath = Join-Path $env:TEMP "ci_win_clients.json"
+          $cfgFast = Join-Path $env:TEMP "ci_win_cfg_fast"
+          $cfgMcp = Join-Path $env:TEMP "ci_win_cfg_mcp"
+          $projDir = Join-Path $env:TEMP "ci_win_proj"
+
+          & $zmem --db $dbPath stats; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $v2mem --db $dbPath stats; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $zmem --db $dbPath doctor --json | Set-Content -Path $docPath -Encoding UTF8; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $zmem --db $dbPath config --mode fast --write-dir $cfgFast --json | Out-Null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $zmem --db $dbPath config --mode mcp --write-dir $cfgMcp --json | Out-Null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $zmem connect --list --json | Set-Content -Path $clientsPath -Encoding UTF8; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $zmem connect --project-rules $projDir; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          if (-not ((Test-Path (Join-Path $scripts "zmem-hud.exe")) -or (Test-Path (Join-Path $scripts "zmem-hud.cmd")))) {
+              throw "zmem-hud entry missing in $scripts"
+          }
+
+          @'
+          import json, os, pathlib
+          tmp = pathlib.Path(os.environ["TEMP"])
+          doc = json.loads((tmp / "ci_win_doctor.json").read_text(encoding="utf-8-sig"))
+          hw = doc["hardware"]
+          print("Hardware probe:", hw)
+          assert hw["os_name"] == "Windows", hw
+          assert hw["ram_gb"] > 0, hw
+          assert hw["recommend_quant"] in ("q8_0", "q4_k_m"), hw
+          clients = json.loads((tmp / "ci_win_clients.json").read_text(encoding="utf-8-sig"))
+          assert len(clients) == 7, clients
+          cd = next(c for c in clients if c["id"] == "claude-desktop")
+          assert "Claude" in cd["config_path"] and cd["config_path"].endswith("claude_desktop_config.json"), cd
+          assert (tmp / "ci_win_cfg_fast" / "fast_sdk_example.py").is_file()
+          assert (tmp / "ci_win_cfg_mcp" / "mcp_config.json").is_file()
+          assert (tmp / "ci_win_cfg_mcp" / "dsh_mcp_patch.yml").is_file()
+          assert (tmp / "ci_win_cfg_mcp" / "MCP_SYSTEM_PROMPT.md").is_file()
+          assert (tmp / "ci_win_proj" / ".cursor" / "rules" / "zeromem.mdc").is_file()
+          assert "zeromem:begin" in (tmp / "ci_win_proj" / "AGENTS.md").read_text(encoding="utf-8")
+          print("[OK] Windows installer + hardware + 7 connectors + dual-mode templates verified.")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  cloud-live-v2:
+    name: "Cloud Live V2 End-to-End (Ubuntu + Ollama)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install and start Ollama from scratch
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then
+              echo "Ollama ready on attempt $i"
+              break
+            fi
+            sleep 1
+          done
+          ollama --version
+
+      - name: Run one-command install.sh
+        run: |
+          ./install.sh --skip-setup --mode mcp
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Pull published Qwen3.5-4B-Memory-V2 & run zmem setup
+        env:
+          QUANT: ${{ github.event.inputs.quant || 'auto' }}
+          ZEROMEM_TIMEOUT: "240"
+        run: |
+          zmem setup --mode mcp --source hf --quant "$QUANT"
+          zmem doctor --json > /tmp/live_doctor.json
+          python3 - <<'PY'
+          import json, pathlib
+          doc = json.loads(pathlib.Path("/tmp/live_doctor.json").read_text(encoding="utf-8"))
+          print("Live doctor:", doc["ollama_state"], doc["model"], doc["hardware"])
+          assert doc["ollama_state"] in ("resident", "ready"), doc
+          assert "memory-v2" in doc["model"].lower(), doc
+          PY
+
+      - name: Run live V2 unit test
+        env:
+          ZEROMEM_NUM_CTX: "4096"
+          ZEROMEM_TIMEOUT: "240"
+        run: python -m unittest discover -s tests -p "test_live_v2.py" -v
+
+      - name: Run full cloud E2E verification suite
+        env:
+          ZEROMEM_BIN: zmem
+          V2MEM_BIN: zmem
+          ZEROMEM_NUM_CTX: "4096"
+          ZEROMEM_TIMEOUT: "240"
+          V2MEM_NUM_CTX: "4096"
+          V2MEM_TIMEOUT: "240"
+          V2MEM_LIVE_TIMEOUT: "240"
+        run: python tests/cloud_e2e_verify.py
+
+      - name: Run demo.py & compatibility alias check
+        env:
+          ZEROMEM_NUM_CTX: "4096"
+          ZEROMEM_TIMEOUT: "240"
+        run: |
+          python demo.py
+          v2mem --db /tmp/compat_check.db stats

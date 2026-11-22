@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zeromem"
+version = "0.2.0"
+description = "ZeroMem (零忆) by ZeroZoneX: zero-dependency local memory engine tailored for Qwen3.5-4B-Memory-V2"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+authors = [
+    { name = "B站IM榴莲 (IMLIULIAN)" }
+]
+keywords = ["zeromem", "zerozonex", "memory", "llm", "ollama", "qwen", "mcp", "sqlite", "local-ai"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://zerozonex.com"
+Repository = "https://github.com/IMLIULIAN/zeromem"
+Documentation = "https://mem.zerozonex.com"
+ModelHub = "https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2"
+ModelScope = "https://modelscope.cn/models/IMLIULIAN/qwen3.5-4b-memory-v2"
+
+[project.scripts]
+zmem = "v2mem.cli:main"
+v2mem = "v2mem.cli:main"
+
+[project.gui-scripts]
+zmem-hud = "v2mem.hud:main_gui"
+v2mem-hud = "v2mem.hud:main_gui"
+
+[tool.setuptools.packages.find]
+include = ["zeromem*", "v2mem*"]
