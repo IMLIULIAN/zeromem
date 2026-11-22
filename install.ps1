@@ -101,7 +101,7 @@ function Ensure-OllamaRunning {
 }
 
 $ModeLabel = if ($Mode -eq "fast") {
-    "方案一：极速省费版（CLI / Python SDK 单次预注）"
+    "方案一：极速省钱版（CLI / Python SDK 单次预注）"
 } else {
     "方案二：满分 Agent 版（MCP 自主拆查 + 主流 Agent 接入）"
 }

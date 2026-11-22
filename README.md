@@ -44,7 +44,7 @@
 
 前置条件：**Python 3.9+** 与 **Ollama**（Windows / macOS / Linux 可追加 `-AutoDeps` / `--auto-deps` 自动补齐依赖并在后台拉起 Ollama；硬件显存自动识别选档 `Q8_0` / `Q4_K_M`，防 6 GB 显存本爆显存）。
 
-| 对比维度 | 方案一：极速省费版（`--mode fast`） | 方案二：满分 Agent 版（`--mode mcp`，默认推荐） |
+| 对比维度 | 方案一：极速省钱版（`--mode fast`） | 方案二：满分 Agent 版（`--mode mcp`，默认推荐） |
 | :--- | :--- | :--- |
 | **接入形态** | CLI 命令行 / 5 行 Python SDK 单次预注 | 零依赖 MCP 4 工具 + 一键接入 7 大主流 Agent + 并行拆查提示词 |
 | **适用对象** | 高频单主题问答、API 代理、自动化脚本 | Claude Desktop / Claude Code / Cursor / Windsurf / Codex / Antigravity / DSH |
@@ -74,7 +74,7 @@ irm https://raw.githubusercontent.com/IMLIULIAN/zeromem/main/install.ps1 | iex
 ZEROMEM_MODE=mcp ZEROMEM_AUTO_DEPS=1 ZEROMEM_CONNECT_ALL=1 curl -fsSL https://raw.githubusercontent.com/IMLIULIAN/zeromem/main/install.sh | bash
 ```
 
-### 方案一：极速省费版（CLI / Python SDK 单次预注，极致低延迟与省费）
+### 方案一：极速省钱版（CLI / Python SDK 单次预注，极致低延迟与省钱）
 
 **Windows (PowerShell)**：
 
@@ -100,7 +100,7 @@ ZEROMEM_MODE=fast ZEROMEM_AUTO_DEPS=1 curl -fsSL https://raw.githubusercontent.c
 ```bash
 pip install git+https://github.com/IMLIULIAN/zeromem.git
 zmem setup --mode mcp --connect-all   # 方案二：自动硬件选档 + 自动接入主流 Agent
-zmem setup --mode fast                # 方案一：极速省费版
+zmem setup --mode fast                # 方案一：极速省钱版
 ```
 
 ---

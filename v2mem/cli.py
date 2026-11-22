@@ -41,7 +41,7 @@ MCP_SYSTEM_PROMPT = """# ZeroMem (零忆) MCP 高效检索纪律（实测 12/12 
 4. **命中即答、诚实拒答**：拿到绑定原文证据后直接准确作答（保留精确数值、生效日期、64 位哈希及“仅提议未执行”等边界）；若检索无记录，最多换词补查 1 次即明确回答“未提及/无记录”，不空转、不编造。
 """
 
-FAST_SDK_EXAMPLE = '''"""ZeroMem (零忆) 方案一：极速省费版（单次预注 Python SDK 示例）。
+FAST_SDK_EXAMPLE = '''"""ZeroMem (零忆) 方案一：极速省钱版（单次预注 Python SDK 示例）。
 
 5.2 万字实测对比全量硬塞：节省 94.3% 输入 Token、冷启动省 93.0% 费用、响应最快、0 云端密钥泄漏。
 """
@@ -161,7 +161,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     quant = hw.recommend_quant if args.quant == "auto" else args.quant.lower()
     num_ctx = args.num_ctx if args.num_ctx is not None else hw.recommend_num_ctx
 
-    mode_label = "方案一：极速省费版（CLI / SDK 单次预注）" if args.mode == "fast" else "方案二：满分 Agent 版（MCP 自主拆查）"
+    mode_label = "方案一：极速省钱版（CLI / SDK 单次预注）" if args.mode == "fast" else "方案二：满分 Agent 版（MCP 自主拆查）"
     print(f"=== ZeroMem (零忆) by ZeroZoneX · 初始化 [{mode_label}] ===")
     print(f"[硬件] {hw.summary_line()}")
     print(f"       依据：{hw.reason}")
@@ -259,7 +259,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
     print(f"[3/3] 就绪！默认数据库路径: {db_path}")
     if args.mode == "fast":
-        print(f"\n[方案一 · 极速省费版] 已生成 Python SDK 单次预注示例: {written['fast_sdk_example']}")
+        print(f"\n[方案一 · 极速省钱版] 已生成 Python SDK 单次预注示例: {written['fast_sdk_example']}")
         print("  快速体验：")
         print('    zmem add "2026-03-01 记录：网关限流 2026-03-15 调为 120 次/分。" --ns demo')
         print('    zmem search "网关限流" --ns demo')
@@ -425,7 +425,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         return 0
 
     if args.mode == "fast":
-        print(f"[zmem] 方案一（极速省费版 · CLI / SDK 单次预注）示例已写入: {written['fast_sdk_example']}\n")
+        print(f"[zmem] 方案一（极速省钱版 · CLI / SDK 单次预注）示例已写入: {written['fast_sdk_example']}\n")
         print(FAST_SDK_EXAMPLE)
     else:
         print(f"[zmem] 方案二（满分 Agent 版 · MCP 自主拆查）配置已写入: {out_dir}")
@@ -553,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["fast", "mcp"],
         default="mcp",
-        help="安装方案：fast（方案一·极速省费 CLI/SDK）或 mcp（方案二·满分 Agent MCP，默认）",
+        help="安装方案：fast（方案一·极速省钱 CLI/SDK）或 mcp（方案二·满分 Agent MCP，默认）",
     )
     p_setup.add_argument(
         "--source",
