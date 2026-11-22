@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# True one-command installer for ZeroMem (零忆) by ZeroZoneX (macOS / Linux)
+# One-command installer for ZeroMem (零忆) by ZeroZoneX (macOS / Linux)
 #
 # Features:
 #   - Automatic GPU/VRAM & Apple Silicon unified memory detection (--quant auto)
 #   - Optional --auto-deps to auto-install Ollama (brew on macOS / official script on Linux)
 #   - Auto-starts Ollama daemon in background if installed but stopped
 #   - Two installation modes:
-#       --mode mcp  : Plan 2 (Recommended — MCP 4 tools + 7 mainstream Agents + 100% accuracy)
-#       --mode fast : Plan 1 (CLI / Python SDK single-recall — 94.3% fewer tokens, fastest)
-#   - Optional --connect-all to auto-backup & connect all detected Agents
+#       --mode mcp  : Plan 2 (Default — 4-tool MCP + 7 mainstream Agents)
+#       --mode fast : Plan 1 (CLI / Python SDK single-recall — low cost & latency)
+#   - Optional --connect-all to auto-backup & connect detected Agents
 #
 # Usage:
 #   ./install.sh --mode mcp --auto-deps --connect-all
@@ -40,7 +40,7 @@ while [ "$#" -gt 0 ]; do
       SKIP_SETUP="1"; shift ;;
     -h|--help)
       echo "ZeroMem (零忆) Installer"
-      echo "  --mode fast|mcp             选择方案：fast（极速省钱 CLI/SDK）或 mcp（满分 Agent，默认）"
+      echo "  --mode fast|mcp             选择方案：fast（轻量省钱 CLI/SDK）或 mcp（Agent MCP，默认）"
       echo "  --source auto|modelscope|hf|ollama"
       echo "  --quant auto|q8_0|q4_k_m    量化档位（默认 auto 按显存/内存自动选）"
       echo "  --auto-deps                 缺少 Ollama 时自动安装并后台拉起服务"
@@ -99,9 +99,9 @@ ensure_ollama_running() {
 }
 
 if [ "${MODE}" = "fast" ]; then
-  MODE_LABEL="方案一：极速省钱版（CLI / Python SDK 单次预注）"
+  MODE_LABEL="方案一：轻量省钱版（CLI / Python SDK 单次预注）"
 else
-  MODE_LABEL="方案二：满分 Agent 版（MCP 自主拆查 + 主流 Agent 接入）"
+  MODE_LABEL="方案二：Agent MCP 版（自主拆查 + 主流 Agent 接入）"
 fi
 log "启动安装 · ${MODE_LABEL}"
 

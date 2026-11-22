@@ -1,19 +1,19 @@
 ﻿<#
 .SYNOPSIS
-    True one-command installer for ZeroMem (零忆) by ZeroZoneX (Windows PowerShell).
+    One-command installer for ZeroMem (零忆) by ZeroZoneX (Windows PowerShell).
     Features:
       - Automatic GPU/VRAM detection (auto-picks Q8_0 vs Q4_K_M + safe num_ctx)
       - Optional -AutoDeps to auto-install missing Python / Ollama via winget
       - Auto-starts Ollama daemon silently if installed but stopped
       - Two install modes:
-          -Mode mcp  : Plan 2 (Recommended — MCP 4 tools + 7 mainstream Agents + 100% accuracy)
-          -Mode fast : Plan 1 (CLI / Python SDK single-recall — 94.3% fewer tokens, fastest)
-      - Optional -ConnectAll to auto-backup & connect all detected Agents (Claude/Cursor/Codex/Antigravity/DSH)
+          -Mode mcp  : Plan 2 (Default — 4-tool MCP + 7 mainstream Agents)
+          -Mode fast : Plan 1 (CLI / Python SDK single-recall — low cost & latency)
+      - Optional -ConnectAll to auto-backup & connect detected Agents (Claude/Cursor/Codex/Antigravity/DSH)
 .EXAMPLE
-    # True one-liner (auto hardware quant + auto model pull + MCP configs)
+    # One-liner (auto hardware quant + auto model pull + MCP configs)
     .\install.ps1 -AutoDeps -ConnectAll -LaunchHud
 
-    # Plan 1 (Fastest CLI / Python SDK)
+    # Plan 1 (Low-cost CLI / Python SDK single-recall)
     .\install.ps1 -Mode fast -Source modelscope
 #>
 param(
@@ -101,9 +101,9 @@ function Ensure-OllamaRunning {
 }
 
 $ModeLabel = if ($Mode -eq "fast") {
-    "方案一：极速省钱版（CLI / Python SDK 单次预注）"
+    "方案一：轻量省钱版（CLI / Python SDK 单次预注）"
 } else {
-    "方案二：满分 Agent 版（MCP 自主拆查 + 主流 Agent 接入）"
+    "方案二：Agent MCP 版（自主拆查 + 主流 Agent 接入）"
 }
 Write-Step "启动安装 · $ModeLabel"
 

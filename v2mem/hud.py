@@ -1092,11 +1092,11 @@ class MemoryWorkbenchWindow:
         def _copy_prompt() -> None:
             dlg.clipboard_clear()
             dlg.clipboard_append(MCP_PROMPT_COPY)
-            msg_lbl.configure(text="✓ 已复制满分并行拆查提示词，可贴入客户端 Rules / System Prompt。", fg=PALETTE["ok"])
+            msg_lbl.configure(text="✓ 已复制推荐并行拆查提示词，可贴入客户端 Rules / System Prompt。", fg=PALETTE["ok"])
 
         self._make_btn(
             foot,
-            "复制满分检索提示词",
+            "复制推荐检索提示词",
             _copy_prompt,
             bg=PALETTE["sky_bg"],
             fg=PALETTE["sky"],

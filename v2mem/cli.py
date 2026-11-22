@@ -31,19 +31,19 @@ from .ollama import (
     register_gguf_in_ollama,
 )
 
-MCP_SYSTEM_PROMPT = """# ZeroMem (零忆) MCP 高效检索纪律（实测 12/12 满分配置）
+MCP_SYSTEM_PROMPT = """# ZeroMem (零忆) MCP 推荐检索约定
 
-你已接入本地记忆库 MCP 工具 `memory_recall`、`memory_remember`、`memory_stats`、`memory_delete`（由本地 Qwen3.5-4B-Memory-V2 驱动，零云端写入费、本地双层脱敏）：
+你已接入本地记忆库 MCP 工具 `memory_recall`、`memory_remember`、`memory_stats`、`memory_delete`（由本地 Qwen3.5-4B-Memory-V2 驱动，写入不消耗云端 API，入库自动脱敏）：
 
-1. **先查后答**：涉及历史项目配置、参数、决议、完整哈希或进展状态时，先调用 `memory_recall` 核实，严禁凭记忆猜测。
+1. **先查后答**：涉及历史项目配置、参数、决议、完整哈希或进展状态时，先调用 `memory_recall` 核实，避免凭印象猜测。
 2. **单主题 1 次短查**：单一主题问题提炼 2–4 个核心关键词调用 1 次 `memory_recall`（`limit=4` 或 `6`）即可。
 3. **跨文档/多指标并行拆查**：当问题同时涉及多个独立模块或指标（如同时问“网关限流上限”与“数据库连接池上限”）时，在同一轮中**并行发起 2 次聚焦短关键词 `memory_recall`**，避免把整段长问句一次塞进单次 FTS5 查询。
 4. **命中即答、诚实拒答**：拿到绑定原文证据后直接准确作答（保留精确数值、生效日期、64 位哈希及“仅提议未执行”等边界）；若检索无记录，最多换词补查 1 次即明确回答“未提及/无记录”，不空转、不编造。
 """
 
-FAST_SDK_EXAMPLE = '''"""ZeroMem (零忆) 方案一：极速省钱版（单次预注 Python SDK 示例）。
+FAST_SDK_EXAMPLE = '''"""ZeroMem (零忆) 方案一：轻量省钱版（单次预注 Python SDK 示例）。
 
-5.2 万字实测对比全量硬塞：节省 94.3% 输入 Token、冷启动省 93.0% 费用、响应最快、0 云端密钥泄漏。
+在 5.2 万字对照基准中相比全量上下文注入约节省 94.3% 输入 Token，并自动做本地凭据脱敏。
 """
 
 from zeromem import Memory
@@ -161,7 +161,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     quant = hw.recommend_quant if args.quant == "auto" else args.quant.lower()
     num_ctx = args.num_ctx if args.num_ctx is not None else hw.recommend_num_ctx
 
-    mode_label = "方案一：极速省钱版（CLI / SDK 单次预注）" if args.mode == "fast" else "方案二：满分 Agent 版（MCP 自主拆查）"
+    mode_label = "方案一：轻量省钱版（CLI / SDK 单次预注）" if args.mode == "fast" else "方案二：Agent MCP 版（自主拆查）"
     print(f"=== ZeroMem (零忆) by ZeroZoneX · 初始化 [{mode_label}] ===")
     print(f"[硬件] {hw.summary_line()}")
     print(f"       依据：{hw.reason}")
@@ -259,16 +259,16 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
     print(f"[3/3] 就绪！默认数据库路径: {db_path}")
     if args.mode == "fast":
-        print(f"\n[方案一 · 极速省钱版] 已生成 Python SDK 单次预注示例: {written['fast_sdk_example']}")
+        print(f"\n[方案一 · 轻量省钱版] 已生成 Python SDK 单次预注示例: {written['fast_sdk_example']}")
         print("  快速体验：")
         print('    zmem add "2026-03-01 记录：网关限流 2026-03-15 调为 120 次/分。" --ns demo')
         print('    zmem search "网关限流" --ns demo')
-        print("  如需随时切换为方案二（MCP 满分 Agent 版），执行：zmem connect --all")
+        print("  如需随时切换为方案二（Agent MCP 版），执行：zmem connect --all")
     else:
-        print(f"\n[方案二 · 满分 Agent 版] 已自动落盘全部配置模板至: {cfg_dir}")
+        print(f"\n[方案二 · Agent MCP 版] 已落盘配置模板至: {cfg_dir}")
         print(f"  - 通用 MCP 配置 (Claude/Cursor/Antigravity): {written['mcp_config']}")
         print(f"  - DSH MCP 补丁:                             {written['dsh_mcp_patch']}")
-        print(f"  - 并行拆查满分检索提示词:                    {written['mcp_prompt']}")
+        print(f"  - 推荐并行拆查检索提示词:                    {written['mcp_prompt']}")
 
         installed_agents = [c for c in detect_clients() if c.installed]
         if args.connect_all and installed_agents:
@@ -425,15 +425,15 @@ def _cmd_config(args: argparse.Namespace) -> int:
         return 0
 
     if args.mode == "fast":
-        print(f"[zmem] 方案一（极速省钱版 · CLI / SDK 单次预注）示例已写入: {written['fast_sdk_example']}\n")
+        print(f"[zmem] 方案一（轻量省钱版 · CLI / SDK 单次预注）示例已写入: {written['fast_sdk_example']}\n")
         print(FAST_SDK_EXAMPLE)
     else:
-        print(f"[zmem] 方案二（满分 Agent 版 · MCP 自主拆查）配置已写入: {out_dir}")
+        print(f"[zmem] 方案二（Agent MCP 版 · 自主拆查）配置已写入: {out_dir}")
         for label, path in written.items():
             print(f"  - {label}: {path}")
         print("\n--- MCP JSON（Claude Desktop / Cursor / Antigravity / Windsurf）---")
         print(json.dumps(_mcp_snippet(db_path, args.model, args.ollama_url), ensure_ascii=False, indent=2))
-        print("\n--- 推荐粘贴到客户端规则的检索纪律提示词（12/12 满分实测配置）---")
+        print("\n--- 推荐粘贴到客户端规则的检索提示词 ---")
         print(MCP_SYSTEM_PROMPT.strip())
     return 0
 
@@ -553,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["fast", "mcp"],
         default="mcp",
-        help="安装方案：fast（方案一·极速省钱 CLI/SDK）或 mcp（方案二·满分 Agent MCP，默认）",
+        help="安装方案：fast（方案一·轻量省钱 CLI/SDK）或 mcp（方案二·Agent MCP，默认）",
     )
     p_setup.add_argument(
         "--source",
@@ -589,7 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--json", action="store_true", help="输出 JSON")
     p_doc.set_defaults(func=_cmd_doctor)
 
-    p_config = sub.add_parser("config", help="随时导出/查看两套接入方案的配置模板与满分提示词")
+    p_config = sub.add_parser("config", help="随时导出/查看两套接入方案的配置模板与推荐提示词")
     p_config.add_argument("--mode", choices=["fast", "mcp"], default="mcp", help="方案选择：fast 或 mcp（默认）")
     p_config.add_argument("--write-dir", default=None, help="模板输出目录（默认 ~/.zeromem/configs）")
     p_config.add_argument("--json", action="store_true", help="以 JSON 格式输出路径与 MCP 配置")
