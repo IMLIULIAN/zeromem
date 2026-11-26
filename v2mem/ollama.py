@@ -137,11 +137,12 @@ class OllamaClient:
         *,
         num_predict: int = 1024,
         retries: int = 1,
+        response_format: dict[str, Any] | str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Invoke /api/chat with thinking disabled and anti-OTL sampling bounds."""
+        """Invoke /api/chat with thinking disabled, anti-OTL bounds, and optional JSON Schema."""
         model = self.resolve_model()
         url = f"{self.base_url}/api/chat"
-        body = {
+        body: dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -159,6 +160,8 @@ class OllamaClient:
                 "repeat_penalty": 1.08,
             },
         }
+        if response_format is not None:
+            body["format"] = response_format
         payload_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
         last_err: Exception | None = None

@@ -156,8 +156,16 @@ zmem disconnect --all           # Cleanly remove ZeroMem without touching other 
 zmem add "2026-03-01 Note: API gateway rate limit increases to 120 req/min on 2026-03-15." --ns demo
 zmem add -f ./notes.md --ns my-project
 
-# Local search with bound original evidence segments
+# Local search with bound original evidence segments (supports event-time range filtering & supersession timeline)
 zmem search "gateway rate limit" --ns demo
+zmem search "Project A" --ns demo --occurred-from 2025-01-01 --occurred-to 2025-12-31
+
+# Read-only Markdown export with bound citations (Obsidian / Git friendly)
+zmem export --md -o ./zeromem-export.md
+zmem export --md --dir ./obsidian-zeromem
+
+# Safe single-file snapshot via SQLite Online Backup API (no -wal/-shm sidecars, cloud-drive safe)
+zmem backup -o ./zeromem-snapshot.db --sha256
 
 # Launch desktop status pill & workbench
 zmem-hud
@@ -171,8 +179,11 @@ from zeromem import Memory  # Also compatible with: from v2mem import Memory
 
 mem = Memory()  # Auto-detects local V2 model & ~/.zeromem/memory.db (migrates ~/.v2-memory seamlessly)
 mem.remember("2026-11-20 Team decided to start with single-file SQLite WAL instead of Redis.", ns="arch")
-for hit in mem.recall("why not Redis", ns="arch"):
+for hit in mem.recall("why not Redis", ns="arch", occurred_from="2026-01-01"):
     print(hit.text, "<- Evidence:", hit.evidence)
+
+mem.export_markdown(output_dir="./obsidian-zeromem")
+mem.backup("./zeromem-snapshot.db", write_sha256=True)
 ```
 
 ### 2. Plan 2: Manual MCP JSON Snippet
@@ -221,11 +232,16 @@ zeromem/
 │   ├── hardware.py         # Pure-stdlib OS / GPU VRAM / Apple Silicon probe & quant selector
 │   ├── connectors.py       # Auto-discovery, backup & reversible connect/disconnect for 7 Agents
 │   ├── ollama.py           # Stdlib Ollama client, sampling options & SHA-256 weight bootstrap
-│   ├── store.py            # Single-file SQLite WAL + dual-track FTS5 store
-│   ├── memory.py           # Core remember() / recall() pipeline
+│   ├── store.py            # Single-file SQLite WAL + dual-track FTS5 + fact_supersessions timeline edges
+│   ├── memory.py           # remember() (with prior-fact recall & supersession tagging) / recall() (time-range filtering)
+│   ├── expiry.py           # Strict until:YYYY-MM-DD expiry demotion, adaptive 2-8 gating & occurred range helpers
+│   ├── governance.py       # Fail-closed retraction ledger & lossless soft-eviction / SHA-256 restore
+│   ├── portability.py      # 100% read-only Markdown export (Obsidian/Git) & SQLite Online Backup snapshots
+│   ├── audit.py            # Read-only AGENTS.md / project rules vs. memory conflict auditor
+│   ├── trace.py            # Opt-in body-free JSONL recall trace logger & summary analyzer
 │   ├── mcp_server.py       # Zero-dep 4-tool MCP stdio server (NDJSON + Content-Length)
 │   ├── hud.py              # Native dark tkinter floating status pill & memory workbench
-│   └── cli.py              # setup / connect / disconnect / doctor / config / add / search / stats / mcp / ui
+│   └── cli.py              # setup / connect / disconnect / doctor / config / add / search / export / backup / stats / mcp / ui
 ├── docs/images/            # Controlled 52k benchmark charts (ZH/EN) & native workbench screenshots
 ├── modelfiles/             # Official Q8_0 / Q4_K_M Ollama Modelfiles
 ├── demo.py                 # Synthetic isolated end-to-end demo
@@ -239,6 +255,8 @@ zeromem/
 ```bash
 # Offline zero-dependency unit tests (no network / no Ollama required)
 python -m unittest discover -s tests -p "test_core.py" -v
+python -m unittest discover -s tests -p "test_governance.py" -v
+python -m unittest discover -s tests -p "test_timeline_and_portability.py" -v
 
 # Live end-to-end smoke test against a local Ollama V2 instance
 python -m unittest discover -s tests -p "test_live_v2.py" -v
@@ -246,8 +264,10 @@ python -m unittest discover -s tests -p "test_live_v2.py" -v
 
 ---
 
-## License & Attribution
+## License, Attribution & Disambiguation
 
 - **License**: **Apache License 2.0** (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - **Author**: **B站IM榴莲 (IMLIULIAN)** · **ZeroZoneX**
-- **Companion Model**: [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2) (derived from `Qwen/Qwen3.5-4B`)
+- **Companion Model**: [`Qwen3.5-4B-Memory-V2`](https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2) (derived from `Qwen/Qwen3.5-4B`, Apache-2.0)
+- **Schema Lineage & Compatibility**: The structured fact schema conventions (`bank`, `type: world | experience | observation`, `occurred_start` / `occurred_end` / `mentioned_at`, `where`, `entities`) are inspired by and kept conceptually compatible with [**Vectorize Hindsight**](https://github.com/vectorize-io/hindsight) (MIT License). ZeroMem's zero-dependency single-file SQLite/FTS5 store, pre-write admission loop, deterministic guardrails, timeline supersession chain, credential redaction, read-only export/online backup, MCP server, and native desktop workbench are independent implementations containing no Hindsight source code.
+- **Name Disambiguation**: **ZeroMem (零忆)** is an independent local SQLite/FTS5 memory engine built around a local 4B specialist model, and is **not** affiliated with or derived from the academic paper *Zero-Mem: Zero-Token Memory Operations for LLM Agents* (Yilin Xiao et al., [arXiv:2607.29377](https://arxiv.org/abs/2607.29377), July 2026), which proposes a non-generative zero-LLM-token entity-context graph and temporal hierarchy framework.

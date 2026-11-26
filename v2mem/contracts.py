@@ -48,6 +48,40 @@ FACT_ADMISSION_SYSTEM = (
     "An absent role means no speaker role was supplied."
 )
 
+FACT_ADMISSION_SUPERSEDE_ADDENDUM = (
+    "supersedes_fact_id rule: input JSON also includes \"prior_facts\" (existing active facts in "
+    "the same namespace, NOT source evidence for the current document—still judge "
+    "pass/revise/drop/hold strictly against \"evidence\"). For every candidate ID also return "
+    "\"supersedes_fact_id\": set it to the exact integer fact_id from prior_facts ONLY when this "
+    "pass/revise candidate directly replaces, migrates, updates, or contradicts that specific "
+    "prior fact on the same subject/parameter/owner. If the candidate is additive, about a "
+    "different module/aspect, dropped/held, or uncertain, set supersedes_fact_id to null. "
+    "Never invent a fact_id not present in prior_facts."
+)
+
+
+def build_admission_supersede_schema(num_candidates: int, prior_fact_ids: list[int]) -> dict[str, Any]:
+    """Build an Ollama JSON Schema constraining verdicts and supersedes_fact_id to [null, ...offered IDs]."""
+    valid_ids = sorted({int(fid) for fid in prior_fact_ids if isinstance(fid, int) and not isinstance(fid, bool) and fid > 0})
+    item_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["decision", "evidence", "replacement", "supersedes_fact_id"],
+        "properties": {
+            "decision": {"type": "string", "enum": ["pass", "revise", "drop", "hold"]},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "replacement": {"type": "string"},
+            "supersedes_fact_id": {"enum": [None, *valid_ids]},
+        },
+    }
+    keys = [str(i) for i in range(max(0, int(num_candidates)))]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": keys,
+        "properties": {k: item_schema for k in keys},
+    }
+
 VALID_FACT_TYPES = frozenset({"world", "experience", "observation"})
 VALID_DECISIONS = frozenset({"pass", "revise", "drop", "hold"})
 
@@ -88,6 +122,7 @@ _CREDENTIAL_PATTERNS = (
 _HEX_TOKEN_RE = re.compile(r"\b[0-9a-fA-F]{16,64}\b")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?；;\n])|(?<=\.\s)")
 _ISO_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_GROUNDED_ISO_DATE_RE = re.compile(r"(?<!until:)(?<![0-9])(\d{4}-\d{2}-\d{2})(?![0-9])", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -321,14 +356,40 @@ def guard_fact(
     occurred_start = str(occurred_start).strip() if occurred_start else None
     occurred_end = str(occurred_end).strip() if occurred_end else None
 
-    if occurred_start and mentioned_at:
+    m_date_str: str | None = None
+    if mentioned_at:
         m_date = _ISO_DATE_PREFIX_RE.match(mentioned_at)
+        if m_date:
+            m_date_str = m_date.group(0)
+
+    if occurred_start and m_date_str:
         o_date = _ISO_DATE_PREFIX_RE.match(occurred_start)
-        if m_date and o_date and m_date.group(0) == o_date.group(0):
+        if o_date and m_date_str == o_date.group(0):
             if o_date.group(0) not in evidence_blob:
                 occurred_start = None
                 if occurred_end and occurred_end.startswith(o_date.group(0)):
                     occurred_end = None
+
+    # Conservative deterministic backfill: if the 4B model kept a single explicit event date
+    # inside fact text (verbatim in evidence, not an `until:` tag, and distinct from record date)
+    # while leaving `occurred_start` null, populate `occurred_start` so occurred_from/to works.
+    if not occurred_start:
+        grounded_dates: list[str] = []
+        for dm in _GROUNDED_ISO_DATE_RE.finditer(text):
+            d_str = dm.group(1)
+            if d_str == m_date_str or d_str not in evidence_blob or d_str in grounded_dates:
+                continue
+            try:
+                y, mo, da = int(d_str[0:4]), int(d_str[5:7]), int(d_str[8:10])
+                if not (1970 <= y <= 9999 and 1 <= mo <= 12 and 1 <= da <= 31):
+                    continue
+                from datetime import date as _date_cls
+                _date_cls(y, mo, da)
+            except ValueError:
+                continue
+            grounded_dates.append(d_str)
+        if len(grounded_dates) == 1:
+            occurred_start = grounded_dates[0]
 
     where_val = fact.get("where")
     where_loc = redact_credentials(str(where_val).strip()) if where_val else None

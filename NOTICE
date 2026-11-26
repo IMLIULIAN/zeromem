@@ -11,3 +11,21 @@ This project (ZeroMem / legacy package alias v2-memory) is designed as a
 zero-dependency local memory engine paired with Qwen3.5-4B-Memory-V2
 (https://huggingface.co/IMLIULIAN/qwen3.5-4b-memory-v2), which is a derivative
 work based on Qwen/Qwen3.5-4B (Apache-2.0).
+
+Schema Lineage & Third-Party Ecosystem Compatibility:
+The structured fact-extraction and pre-write admission schema conventions used
+in ZeroMem (including bank/namespace partitioning, fact types
+"world" / "experience" / "observation", temporal fields occurred_start /
+occurred_end / mentioned_at, and where / entities metadata) are inspired by and
+conceptually compatible with Vectorize Hindsight
+(https://github.com/vectorize-io/hindsight, MIT License). ZeroMem's single-file
+SQLite/FTS5 storage engine, deterministic guardrails, admission loop, timeline
+supersession store, credential redaction, export/backup utilities, MCP server,
+and desktop workbench are independent clean-room implementations containing no
+Hindsight source code.
+
+Name Disambiguation:
+ZeroMem (零忆, by B站IM榴莲 / IMLIULIAN / ZeroZoneX) is an independent open-source
+local memory engine and is not affiliated with, derived from, or related to the
+academic paper "Zero-Mem: Zero-Token Memory Operations for LLM Agents"
+(Yilin Xiao et al., arXiv:2607.29377, July 2026).

@@ -66,8 +66,29 @@ TOOLS_SPEC = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of facts to return (1-20, default: 6).",
-                    "default": 6,
+                    "description": "Optional maximum number of facts to return (1-20; omit for adaptive 2-8 gating).",
+                },
+                "adaptive": {
+                    "type": "boolean",
+                    "description": "Enable adaptive relative-score tail pruning (default: true).",
+                    "default": True,
+                },
+                "as_of": {
+                    "type": "string",
+                    "description": "Optional ISO date (YYYY-MM-DD) for evaluating until: expiry demotion.",
+                },
+                "occurred_from": {
+                    "type": "string",
+                    "description": "Optional inclusive event-time lower bound (YYYY, YYYY-MM, or YYYY-MM-DD).",
+                },
+                "occurred_to": {
+                    "type": "string",
+                    "description": "Optional inclusive event-time upper bound (YYYY, YYYY-MM, or YYYY-MM-DD).",
+                },
+                "include_superseded": {
+                    "type": "boolean",
+                    "description": "Include historical facts superseded by newer facts (default: true; demoted after current facts).",
+                    "default": True,
                 },
             },
             "required": ["query"],
@@ -174,15 +195,25 @@ class MCPStdioServer:
                 return self._tool_text(req_id, res.to_dict())
 
             if name == "memory_recall":
+                raw_limit = args.get("limit")
                 hits = self.memory.recall(
                     query=str(args.get("query") or ""),
                     ns=args.get("namespace") or None,
-                    limit=int(args.get("limit") or 6),
+                    limit=int(raw_limit) if raw_limit is not None else None,
+                    adaptive=bool(args.get("adaptive", True)),
+                    as_of=args.get("as_of") or None,
+                    occurred_from=args.get("occurred_from") or None,
+                    occurred_to=args.get("occurred_to") or None,
+                    include_superseded=bool(args.get("include_superseded", True)),
+                    trace_channel="zeromem_mcp",
                 )
-                payload = {
+                expired_count = sum(1 for h in hits if h.until_expiry)
+                payload: dict[str, Any] = {
                     "count": len(hits),
                     "items": [h.to_dict() for h in hits],
                 }
+                if expired_count > 0:
+                    payload["expired_count"] = expired_count
                 return self._tool_text(req_id, payload)
 
             if name == "memory_stats":

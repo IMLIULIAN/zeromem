@@ -3,24 +3,31 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
+import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .contracts import (
+    FACT_ADMISSION_SUPERSEDE_ADDENDUM,
     FACT_ADMISSION_SYSTEM,
     FACT_EXTRACTION_SYSTEM,
     VALID_DECISIONS,
     Segment,
+    build_admission_supersede_schema,
     build_segments,
     guard_fact,
     parse_json_object,
     window_segments,
 )
+from .expiry import ADAPTIVE_MIN_LIMIT, ADAPTIVE_SCORE_RATIO, resolve_default_limit
 from .ollama import DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL, OllamaClient
+from .portability import backup_database, export_markdown
 from .store import SQLiteMemoryStore
+from .trace import RecallTracer, build_trace_record, resolve_trace_dir
 
 
 def default_home_dir() -> Path:
@@ -52,6 +59,7 @@ class RememberResult:
     extracted: int = 0
     saved: int = 0
     revised: int = 0
+    superseded: int = 0
     dropped: int = 0
     held: int = 0
     guard_rejected: int = 0
@@ -79,9 +87,16 @@ class RecallHit:
     action: str
     mentioned_at: str
     score: float
+    until_expiry: dict[str, Any] | None = None
+    supersedes_fact_id: int | None = None
+    superseded_by: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        for opt_key in ("until_expiry", "supersedes_fact_id", "superseded_by"):
+            if data.get(opt_key) is None:
+                data.pop(opt_key, None)
+        return data
 
 
 class Memory:
@@ -119,9 +134,10 @@ class Memory:
         source_id: str | None = None,
         mentioned_at: str | None = None,
         verify: bool = True,
+        link_supersessions: bool = True,
         max_window_chars: int = 1400,
     ) -> RememberResult:
-        """Ingest text or chat turns: short-window chunk -> extract -> 1-round admit -> guard -> store."""
+        """Ingest text or chat turns: short-window chunk -> extract -> prior FTS5 lookup -> 1-round admit -> guard -> store."""
         namespace = (ns or "default").strip() or "default"
         ts = (mentioned_at or utc_now_iso()).strip()
         created_at = utc_now_iso()
@@ -158,18 +174,25 @@ class Memory:
                 continue
 
             if verify:
+                prior_facts = (
+                    self._find_prior_facts(namespace=namespace, candidates=candidates, max_items=6)
+                    if link_supersessions
+                    else []
+                )
                 reviewed = self._admit_window(
                     window=win,
                     candidates=candidates,
                     mentioned_at=ts,
                     namespace=namespace,
                     result=result,
+                    prior_facts=prior_facts,
                 )
             else:
                 reviewed = [{**c, "action": "bypass"} for c in candidates]
 
             for cand in reviewed:
                 action = str(cand.get("action") or "pass")
+                supersedes_fid = cand.get("supersedes_fact_id")
                 guarded, _ = guard_fact(cand, seg_map, mentioned_at=ts)
                 if not guarded:
                     result.guard_rejected += 1
@@ -179,6 +202,8 @@ class Memory:
                     continue
                 seen_fact_keys.add(dedup_key)
                 guarded["action"] = action
+                if isinstance(supersedes_fid, int) and not isinstance(supersedes_fid, bool) and supersedes_fid > 0:
+                    guarded["supersedes_fact_id"] = supersedes_fid
                 accepted_facts.append(guarded)
 
         saved_ids = self.store.save_document_and_facts(
@@ -192,6 +217,7 @@ class Memory:
             facts=accepted_facts,
         )
         result.saved = len(saved_ids)
+        result.superseded = sum(1 for f in accepted_facts if f.get("supersedes_fact_id") is not None)
         result.fact_ids = saved_ids
         result.facts = accepted_facts
         return result
@@ -201,11 +227,50 @@ class Memory:
         query: str,
         *,
         ns: str | None = None,
-        limit: int = 6,
+        limit: int | None = None,
+        adaptive: bool = True,
+        min_limit: int = ADAPTIVE_MIN_LIMIT,
+        score_ratio: float = ADAPTIVE_SCORE_RATIO,
+        as_of: str | date | None = None,
+        occurred_from: str | date | None = None,
+        occurred_to: str | date | None = None,
+        include_superseded: bool = True,
+        recall_log_dir: str | Path | None = None,
+        trace_channel: str = "zeromem_recall",
     ) -> list[RecallHit]:
-        """Dual-track FTS5 recall over facts and bound original evidence segments."""
-        rows = self.store.search(query, namespace=ns, limit=limit)
-        return [RecallHit(**r) for r in rows]
+        """Dual-track FTS5 recall with occurred-time filter, supersession lineage, expiry demotion, and opt-in trace."""
+        started = time.monotonic()
+        eff_limit = resolve_default_limit(limit, adaptive=adaptive)
+        rows = self.store.search(
+            query,
+            namespace=ns,
+            limit=limit,
+            adaptive=adaptive,
+            min_limit=min_limit,
+            score_ratio=score_ratio,
+            as_of=as_of,
+            occurred_from=occurred_from,
+            occurred_to=occurred_to,
+            include_superseded=include_superseded,
+        )
+        hits = [RecallHit(**r) for r in rows]
+        trace_dir = resolve_trace_dir(recall_log_dir)
+        if trace_dir is not None:
+            try:
+                RecallTracer(trace_dir).log(
+                    build_trace_record(
+                        query=query,
+                        hits=rows,
+                        elapsed_ms=(time.monotonic() - started) * 1000.0,
+                        namespace=ns,
+                        channel=trace_channel,
+                        limit=eff_limit,
+                        adaptive=adaptive,
+                    )
+                )
+            except Exception:
+                pass
+        return hits
 
     def stats(self, ns: str | None = None) -> dict[str, Any]:
         return self.store.stats(namespace=ns)
@@ -218,6 +283,48 @@ class Memory:
 
     def delete_document(self, doc_id: str) -> bool:
         return self.store.delete_document(doc_id)
+
+    def export_markdown(
+        self,
+        *,
+        output_path: str | Path | None = None,
+        output_dir: str | Path | None = None,
+        ns: str | None = None,
+        occurred_from: str | date | None = None,
+        occurred_to: str | date | None = None,
+        as_of: str | date | None = None,
+        include_superseded: bool = True,
+        include_evicted: bool = False,
+        frontmatter: bool = True,
+    ) -> dict[str, Any]:
+        return export_markdown(
+            db_path=self.db_path,
+            output_path=output_path,
+            output_dir=output_dir,
+            namespace=ns,
+            occurred_from=occurred_from,
+            occurred_to=occurred_to,
+            as_of=as_of,
+            include_superseded=include_superseded,
+            include_evicted=include_evicted,
+            frontmatter=frontmatter,
+        )
+
+    def backup(
+        self,
+        output_path: str | Path | None = None,
+        *,
+        overwrite: bool = False,
+        verify: bool = True,
+        write_sha256: bool = False,
+    ) -> dict[str, Any]:
+        return backup_database(
+            db_path=self.db_path,
+            output_path=output_path,
+            overwrite=overwrite,
+            verify=verify,
+            write_sha256=write_sha256,
+        )
 
     def _extract_window(
         self,
@@ -242,6 +349,78 @@ class Memory:
         facts = [f for f in parsed["facts"] if isinstance(f, dict)]
         return facts, str(meta.get("model") or "")
 
+    def _find_prior_facts(
+        self,
+        *,
+        namespace: str,
+        candidates: list[dict[str, Any]],
+        max_items: int = 6,
+    ) -> list[dict[str, Any]]:
+        """Sub-millisecond same-namespace FTS5 lookup for active historical facts relevant to candidates."""
+        if not candidates or max_items <= 0:
+            return []
+        collected: dict[int, tuple[float, dict[str, Any]]] = {}
+        for cand in candidates:
+            entities = cand.get("entities") if isinstance(cand.get("entities"), list) else []
+            parts = [str(e).strip() for e in entities[:4] if str(e).strip()]
+            text = str(cand.get("text") or "").strip()
+            if text:
+                parts.append(text[:120])
+            query = " ".join(parts).strip()
+            if not query:
+                continue
+            try:
+                rows = self.store.search(
+                    query,
+                    namespace=namespace,
+                    limit=3,
+                    adaptive=False,
+                    include_superseded=False,
+                )
+            except Exception:
+                continue
+            for r in rows:
+                fid = int(r["fact_id"])
+                score = float(r.get("score") or 0.0)
+                prev = collected.get(fid)
+                if prev is None or score > prev[0]:
+                    collected[fid] = (
+                        score,
+                        {
+                            "fact_id": fid,
+                            "text": str(r["text"]),
+                            "occurred_start": r.get("occurred_start"),
+                            "mentioned_at": str(r.get("mentioned_at") or ""),
+                            "entities": list(r.get("entities") or [])[:6],
+                        },
+                    )
+        ranked = sorted(collected.values(), key=lambda pair: (-pair[0], pair[1]["fact_id"]))
+        return [item for _, item in ranked[:max_items]]
+
+    @staticmethod
+    def _parse_supersedes_id(verdict: dict[str, Any], offered_prior_ids: set[int]) -> int | None:
+        if not offered_prior_ids:
+            return None
+        raw = verdict.get("supersedes_fact_id")
+        raw_candidates: list[Any] = []
+        if isinstance(raw, list):
+            raw_candidates.extend(raw)
+        elif raw is not None:
+            raw_candidates.append(raw)
+        elif isinstance(verdict.get("supersedes_fact_ids"), list):
+            raw_candidates.extend(verdict["supersedes_fact_ids"])
+        for val in raw_candidates:
+            if isinstance(val, bool):
+                continue
+            parsed: int | None = None
+            if isinstance(val, int):
+                parsed = val
+            elif isinstance(val, str) and val.strip().isdigit():
+                parsed = int(val.strip())
+            if parsed is not None and parsed in offered_prior_ids:
+                return parsed
+        return None
+
     def _admit_window(
         self,
         *,
@@ -250,8 +429,9 @@ class Memory:
         mentioned_at: str,
         namespace: str,
         result: RememberResult,
+        prior_facts: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Bounded single-round admission: pass/revise directly, isolate drop/hold per item."""
+        """Bounded single-round admission: pass/revise directly, optional supersedes_fact_id, isolate drop/hold."""
         facts_map: dict[str, dict[str, Any]] = {}
         for idx, cand in enumerate(candidates):
             facts_map[str(idx)] = {
@@ -266,14 +446,36 @@ class Memory:
                 "tags": [],
             }
 
-        payload = {
+        payload: dict[str, Any] = {
             "evidence": [s.to_payload() for s in window],
             "facts": facts_map,
         }
+        offered_prior_ids: set[int] = set()
+        admit_schema: dict[str, Any] | None = None
+        if prior_facts:
+            payload["prior_facts"] = prior_facts
+            offered_prior_ids = {int(pf["fact_id"]) for pf in prior_facts if isinstance(pf.get("fact_id"), int)}
+            system_prompt = f"{FACT_ADMISSION_SYSTEM} {FACT_ADMISSION_SUPERSEDE_ADDENDUM}"
+            if offered_prior_ids:
+                admit_schema = build_admission_supersede_schema(len(candidates), sorted(offered_prior_ids))
+        else:
+            system_prompt = FACT_ADMISSION_SYSTEM
+
+        chat_kwargs: dict[str, Any] = {"num_predict": 768}
+        if admit_schema is not None:
+            try:
+                sig = inspect.signature(self.client.chat_json)
+                if "response_format" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    chat_kwargs["response_format"] = admit_schema
+            except (TypeError, ValueError):
+                pass
+
         raw, _ = self.client.chat_json(
-            FACT_ADMISSION_SYSTEM,
+            system_prompt,
             payload,
-            num_predict=768,
+            **chat_kwargs,
         )
         verdicts = parse_json_object(raw)
         if not verdicts:
@@ -292,14 +494,21 @@ class Memory:
 
             ev_override = verdict.get("evidence")
             ev = ev_override if isinstance(ev_override, list) and ev_override else cand.get("evidence")
+            supersedes_id = self._parse_supersedes_id(verdict, offered_prior_ids)
 
             if decision == "pass":
-                approved.append({**cand, "evidence": ev, "action": "pass"})
+                entry = {**cand, "evidence": ev, "action": "pass"}
+                if supersedes_id is not None:
+                    entry["supersedes_fact_id"] = supersedes_id
+                approved.append(entry)
             elif decision == "revise":
                 replacement = str(verdict.get("replacement") or "").strip()
                 if replacement:
                     result.revised += 1
-                    approved.append({**cand, "text": replacement, "evidence": ev, "action": "revise"})
+                    entry = {**cand, "text": replacement, "evidence": ev, "action": "revise"}
+                    if supersedes_id is not None:
+                        entry["supersedes_fact_id"] = supersedes_id
+                    approved.append(entry)
                 else:
                     result.held += 1
             elif decision == "drop":

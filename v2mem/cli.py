@@ -1,4 +1,4 @@
-"""ZeroMem (零忆) CLI: setup / connect / disconnect / doctor / config / add / search / stats / mcp / ui."""
+"""ZeroMem (零忆) CLI: setup / connect / disconnect / doctor / config / add / search / stats / mcp / ui / export / backup / audit / evict / restore / retract / trace-summary."""
 
 from __future__ import annotations
 
@@ -19,7 +19,11 @@ from .connectors import (
 from .hardware import detect_hardware
 from .hud import launch_hud
 from .mcp_server import MCPStdioServer
+from .audit import audit_rules_vs_memory, discover_rule_files, load_zeromem_memories, render_audit_markdown, write_audit_report
+from .governance import restore_evicted, retract_record, soft_evict
 from .memory import Memory, default_db_path, default_home_dir
+from .portability import backup_database, export_markdown
+from .trace import summarize_traces
 from .ollama import (
     DEFAULT_NUM_CTX,
     DEFAULT_OLLAMA_URL,
@@ -472,11 +476,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
         return 0
     print(
         f"  模型={res.model} | 窗口={res.windows} | 抽取={res.extracted} | "
-        f"入库={res.saved} (修订={res.revised}, 丢弃={res.dropped}, 隔离={res.held}, 守卫拦截={res.guard_rejected})"
+        f"入库={res.saved} (修订={res.revised}, 替代旧事实={res.superseded}, 丢弃={res.dropped}, 隔离={res.held}, 守卫拦截={res.guard_rejected})"
     )
     for f in res.facts:
         occ = f" [发生:{f['occurred_start']}]" if f.get("occurred_start") else ""
-        print(f"  - ({f['type']}/{f['action']}){occ} {f['text']}  <ev:{','.join(f['evidence'])}>")
+        sup = f" [替代:#{f['supersedes_fact_id']}]" if f.get("supersedes_fact_id") is not None else ""
+        print(f"  - ({f['type']}/{f['action']}){occ}{sup} {f['text']}  <ev:{','.join(f['evidence'])}>")
     return 0
 
 
@@ -488,7 +493,18 @@ def _cmd_search(args: argparse.Namespace) -> int:
         num_ctx=args.num_ctx,
     )
     query = " ".join(args.query)
-    hits = mem.recall(query, ns=args.ns, limit=args.limit)
+    hits = mem.recall(
+        query,
+        ns=args.ns,
+        limit=args.limit,
+        adaptive=not args.no_adaptive,
+        as_of=args.as_of,
+        occurred_from=args.occurred_from,
+        occurred_to=args.occurred_to,
+        include_superseded=not args.hide_superseded,
+        recall_log_dir=args.recall_log_dir,
+        trace_channel="zeromem_cli",
+    )
     if args.json:
         print(json.dumps([h.to_dict() for h in hits], ensure_ascii=False, indent=2))
         return 0
@@ -496,11 +512,161 @@ def _cmd_search(args: argparse.Namespace) -> int:
     print(f"[zmem] 检索 {query!r} -> 命中 {len(hits)} 条")
     for idx, h in enumerate(hits, 1):
         time_info = f"occurred={h.occurred_start or '-'} | recorded={h.mentioned_at}"
-        print(f"\n{idx}. [{h.namespace}] ({h.type}/{h.action}, score={h.score}) {time_info}")
+        badges: list[str] = []
+        if h.supersedes_fact_id is not None:
+            badges.append(f"替代 #{h.supersedes_fact_id}")
+        if h.superseded_by:
+            badges.append("已被 " + ",".join(f"#{x}" for x in h.superseded_by) + " 替代")
+        if h.until_expiry:
+            badges.append(str(h.until_expiry["label"]))
+        badge_str = (" [" + " | ".join(badges) + "]") if badges else ""
+        print(f"\n{idx}. (#{h.fact_id} · {h.namespace}) ({h.type}/{h.action}, score={h.score}){badge_str} {time_info}")
         print(f"   事实: {h.text}")
         for ev in h.evidence:
             role_tag = f"[{ev['role']}] " if ev.get("role") else ""
             print(f"   原文({ev['id']}): {role_tag}{ev['text']}")
+    return 0
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser() if args.db else default_db_path()
+    res = export_markdown(
+        db_path=db_path,
+        output_path=args.output,
+        output_dir=args.dir,
+        namespace=args.ns,
+        occurred_from=args.occurred_from,
+        occurred_to=args.occurred_to,
+        as_of=args.as_of,
+        include_superseded=not args.hide_superseded,
+        include_evicted=args.include_evicted,
+        frontmatter=not args.no_frontmatter,
+    )
+    if args.json:
+        out_obj = {k: v for k, v in res.items() if k != "markdown"}
+        print(json.dumps(out_obj, ensure_ascii=False, indent=2))
+        return 0
+    if res["mode"] == "stdout":
+        print(res["markdown"], end="")
+        return 0
+    if res["mode"] == "directory":
+        print(
+            f"[zmem] 只读导出 Markdown 目录完成: {res['output_dir']} "
+            f"({len(res['namespaces'])} 个空间 / {res['facts_exported']} 条事实 / {len(res['files_written'])} 个文件)"
+        )
+    else:
+        print(
+            f"[zmem] 只读导出 Markdown 完成: {res['output_path']} "
+            f"({len(res['namespaces'])} 个空间 / {res['facts_exported']} 条事实)"
+        )
+    return 0
+
+
+def _cmd_backup(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser() if args.db else default_db_path()
+    target = args.output or args.target
+    res = backup_database(
+        db_path=db_path,
+        output_path=target,
+        overwrite=args.overwrite,
+        verify=not args.no_verify,
+        write_sha256=args.sha256,
+    )
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+    print(f"[zmem] SQLite 在线备份完成（无 WAL 伴生文件，可安全网盘同步）")
+    print(f"  源文件   : {res['source_db']}")
+    print(f"  快照路径 : {res['backup_path']}")
+    print(
+        f"  校验结果 : integrity={res['integrity_check']} | journal_mode={res['journal_mode']} | "
+        f"大小={res['size_bytes']} B | 耗时={res['elapsed_ms']} ms"
+    )
+    print(
+        f"  记录统计 : 文档={res['counts']['documents']} / 原文段={res['counts']['segments']} / "
+        f"事实={res['counts']['facts']} / 替代链={res['counts']['supersessions']}"
+    )
+    print(f"  SHA-256  : {res['sha256']}")
+    if res.get("sha256_file"):
+        print(f"  校验文件 : {res['sha256_file']}")
+    return 0
+
+
+def _cmd_trace_summary(args: argparse.Namespace) -> int:
+    res = summarize_traces(args.dir, days=args.days)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_retract(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser() if args.db else default_db_path()
+    res = retract_record(
+        db_path=db_path,
+        fact_id=args.fact_id,
+        doc_id=args.doc_id,
+        reason=args.reason,
+        archive_root=args.archive_root,
+        ledger_dir=args.ledger_dir,
+        apply=args.apply,
+    )
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_evict(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser() if args.db else default_db_path()
+    res = soft_evict(
+        db_path=db_path,
+        fact_ids=args.fact_id,
+        doc_ids=args.doc_id,
+        expired_only=args.expired,
+        namespace=args.ns,
+        as_of=args.as_of,
+        reason=args.reason,
+        batch_id=args.batch_id,
+        dump_manifest=args.dump,
+        ledger_dir=args.ledger_dir,
+        force=args.force,
+        apply=args.apply,
+    )
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_restore(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser() if args.db else default_db_path()
+    res = restore_evicted(
+        db_path=db_path,
+        batch_id=args.batch,
+        verify_manifest=args.verify,
+        ledger_dir=args.ledger_dir,
+        apply=args.apply,
+    )
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser() if args.db else default_db_path()
+    rule_files: list[Path] = []
+    if args.rules:
+        rule_files.extend(Path(r).expanduser().resolve() for r in args.rules)
+    if args.project or args.include_globals or not rule_files:
+        proj = args.project if args.project else (None if rule_files else ".")
+        discovered = discover_rule_files(project_dir=proj, include_home_globals=args.include_globals)
+        seen = {str(p).casefold() for p in rule_files}
+        for p in discovered:
+            if str(p).casefold() not in seen:
+                rule_files.append(p)
+                seen.add(str(p).casefold())
+    mems, exp = load_zeromem_memories(db_path, namespace=args.ns, as_of=args.as_of)
+    report = audit_rules_vs_memory(rule_files=rule_files, memory_records=mems, expiry_summary=exp)
+    if args.out:
+        report["written_files"] = write_audit_report(report, args.out)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(render_audit_markdown(report))
     return 0
 
 
@@ -606,11 +772,40 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.set_defaults(func=_cmd_add)
 
     p_search = sub.add_parser("search", help="检索记忆并回溯原文证据")
-    p_search.add_argument("query", nargs="*", help="查询词（留空返回最新记忆）")
+    p_search.add_argument("query", nargs="*", help="查询词（留空返回最新或时间区间内记忆）")
     p_search.add_argument("--ns", default=None, help="按命名空间过滤")
-    p_search.add_argument("-k", "--limit", type=int, default=6, help="返回条数（默认 6）")
+    p_search.add_argument("-k", "--limit", type=int, default=None, help="返回条数上限（省略则启用 2–8 动态分数门槛）")
+    p_search.add_argument("--no-adaptive", action="store_true", help="关闭动态相对分数门槛，恢复固定条数")
+    p_search.add_argument("--as-of", default=None, help="指定 YYYY-MM-DD 基准日核验 until: 时效")
+    p_search.add_argument("--occurred-from", default=None, help="事件发生时间下限（YYYY / YYYY-MM / YYYY-MM-DD，含当日）")
+    p_search.add_argument("--occurred-to", default=None, help="事件发生时间上限（YYYY / YYYY-MM / YYYY-MM-DD，含当日）")
+    p_search.add_argument("--hide-superseded", action="store_true", help="隐藏已被更新事实替代的历史记忆")
+    p_search.add_argument("--recall-log-dir", default=None, help="可选：本次召回旁路元数据日志目录")
     p_search.add_argument("--json", action="store_true", help="输出原始 JSON")
     p_search.set_defaults(func=_cmd_search)
+
+    p_exp = sub.add_parser("export", help="100% 只读导出带原文引用的 Markdown（适配 Obsidian / Git 检视）")
+    p_exp.add_argument("--md", action="store_true", help="导出 Markdown 格式（默认即为 Markdown）")
+    p_exp.add_argument("-o", "--output", default=None, help="输出为单个 .md 文件（省略且未指定 --dir 时输出到标准输出）")
+    p_exp.add_argument("--dir", default=None, help="按命名空间拆分为 Obsidian/Git 目录（生成 INDEX.md 与各空间 .md）")
+    p_exp.add_argument("--ns", default=None, help="仅导出指定命名空间")
+    p_exp.add_argument("--occurred-from", default=None, help="按事件时间下限过滤（YYYY / YYYY-MM / YYYY-MM-DD）")
+    p_exp.add_argument("--occurred-to", default=None, help="按事件时间上限过滤（YYYY / YYYY-MM / YYYY-MM-DD）")
+    p_exp.add_argument("--as-of", default=None, help="指定 YYYY-MM-DD 基准日评估 until: 过期标注")
+    p_exp.add_argument("--hide-superseded", action="store_true", help="不导出已被更新事实替代的历史记录")
+    p_exp.add_argument("--include-evicted", action="store_true", help="附带回收站（evicted_records）摘要表")
+    p_exp.add_argument("--no-frontmatter", action="store_true", help="省略 YAML frontmatter")
+    p_exp.add_argument("--json", action="store_true", help="输出导出回执 JSON")
+    p_exp.set_defaults(func=_cmd_export)
+
+    p_bak = sub.add_parser("backup", help="走 SQLite Online Backup API 导出无 WAL 干净快照（安全网盘同步）")
+    p_bak.add_argument("target", nargs="?", default=None, help="快照文件路径或目标目录（省略则写入 <db同级>/backups/）")
+    p_bak.add_argument("-o", "--output", default=None, help="同 target：指定快照文件路径或目录")
+    p_bak.add_argument("--overwrite", action="store_true", help="若目标文件已存在则原子覆盖")
+    p_bak.add_argument("--no-verify", action="store_true", help="跳过快照 PRAGMA integrity_check 完整性校验")
+    p_bak.add_argument("--sha256", action="store_true", help="额外生成同级 .sha256 校验文件")
+    p_bak.add_argument("--json", action="store_true", help="输出备份回执 JSON")
+    p_bak.set_defaults(func=_cmd_backup)
 
     p_stats = sub.add_parser("stats", help="查看记忆库统计")
     p_stats.add_argument("--ns", default=None, help="按命名空间过滤")
@@ -625,6 +820,55 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--browser", action="store_true", help="启动时直接打开 ZeroMem 记忆工作台窗口")
     p_ui.add_argument("--no-topmost", action="store_true", help="悬浮胶囊不默认置顶")
     p_ui.set_defaults(func=_cmd_ui)
+
+    p_ts = sub.add_parser("trace-summary", help="只读汇总召回旁路日志（命中率、延迟、零命中与过期命中）")
+    p_ts.add_argument("--dir", required=True, help="包含 *-recall-trace*.jsonl 的日志目录")
+    p_ts.add_argument("--days", type=int, default=30, help="回看天数（默认 30）")
+    p_ts.add_argument("--json", action="store_true", help="输出 JSON（默认即为 JSON）")
+    p_ts.set_defaults(func=_cmd_trace_summary)
+
+    p_ret = sub.add_parser("retract", help="删前归档 + 写入 retractions.jsonl 台账并校验后再删除（默认 dry-run）")
+    p_ret.add_argument("--fact-id", type=int, default=None, help="要撤回的单条 fact_id")
+    p_ret.add_argument("--doc-id", default=None, help="要撤回的完整 doc_id")
+    p_ret.add_argument("--reason", required=True, help="撤回原因（必填）")
+    p_ret.add_argument("--archive-root", default=None, help="外部归档目录（或设 ZEROMEM_REMOVED_ROOT）")
+    p_ret.add_argument("--ledger-dir", default=None, help="台账目录（默认 <db同级>/governance）")
+    p_ret.add_argument("--apply", action="store_true", help="确认落盘归档并执行删除（默认 dry-run）")
+    p_ret.add_argument("--json", action="store_true", help="输出 JSON")
+    p_ret.set_defaults(func=_cmd_retract)
+
+    p_ev = sub.add_parser("evict", help="无损软淘汰至同库 evicted_records 边表（默认 dry-run）")
+    p_ev.add_argument("--fact-id", type=int, action="append", default=None, help="按 fact_id 选择（可重复）")
+    p_ev.add_argument("--doc-id", action="append", default=None, help="按 doc_id 选择（可重复）")
+    p_ev.add_argument("--expired", action="store_true", help="选择全部带已过期 until: 标签的活跃事实")
+    p_ev.add_argument("--ns", default=None, help="限定命名空间")
+    p_ev.add_argument("--as-of", default=None, help="指定 YYYY-MM-DD 基准日")
+    p_ev.add_argument("--reason", default="soft-evict", help="淘汰原因")
+    p_ev.add_argument("--batch-id", default=None, help="自定义批次 ID")
+    p_ev.add_argument("--dump", default=None, help="输出逐行 SHA-256 指纹清单 JSON")
+    p_ev.add_argument("--ledger-dir", default=None, help="可选：同步追加 retractions.jsonl")
+    p_ev.add_argument("--force", action="store_true", help="允许清空范围内的全部活跃记录")
+    p_ev.add_argument("--apply", action="store_true", help="确认执行软淘汰（默认 dry-run）")
+    p_ev.add_argument("--json", action="store_true", help="输出 JSON")
+    p_ev.set_defaults(func=_cmd_evict)
+
+    p_res = sub.add_parser("restore", help="校验 SHA-256 指纹后原子恢复软淘汰批次（默认 dry-run）")
+    p_res.add_argument("--batch", required=True, help="待恢复的 batch_id")
+    p_res.add_argument("--verify", default=None, help="可选：配合 evict --dump 生成的指纹清单核验")
+    p_res.add_argument("--ledger-dir", default=None, help="可选：同步追加 retractions.jsonl")
+    p_res.add_argument("--apply", action="store_true", help="确认执行原子恢复（默认 dry-run）")
+    p_res.add_argument("--json", action="store_true", help="输出 JSON")
+    p_res.set_defaults(func=_cmd_restore)
+
+    p_aud = sub.add_parser("audit", help="100% 只读无 LLM 体检 AGENTS.md / 规则文件与 ZeroMem 记忆重叠及冲突")
+    p_aud.add_argument("--rules", action="append", default=None, help="显式指定规则文件路径（可重复）")
+    p_aud.add_argument("--project", default=None, help="自动发现指定项目目录下的 AGENTS.md / CLAUDE.md / .cursor/rules")
+    p_aud.add_argument("--include-globals", action="store_true", help="一并扫描当前用户主目录下的全局 Agent 规则")
+    p_aud.add_argument("--ns", default=None, help="限定扫描的记忆命名空间")
+    p_aud.add_argument("--as-of", default=None, help="指定 YYYY-MM-DD 基准日统计 until: 时效")
+    p_aud.add_argument("--out", default=None, help="可选：将 JSON 与 Markdown 体检报告写入目录")
+    p_aud.add_argument("--json", action="store_true", help="输出 JSON")
+    p_aud.set_defaults(func=_cmd_audit)
 
     return parser
 
