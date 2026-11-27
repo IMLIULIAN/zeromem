@@ -50,7 +50,7 @@ FAST_SDK_EXAMPLE = '''"""ZeroMem (零忆) 方案一：轻量省钱版（单次�
 在 5.2 万字对照基准中相比全量上下文注入约节省 94.3% 输入 Token，并自动做本地凭据脱敏。
 """
 
-from zeromem import Memory
+from zeromem import Memory, format_recall_context
 
 
 def build_prompt_with_memory(question: str, *, ns: str = "default", top_k: int = 6) -> str:
@@ -58,14 +58,8 @@ def build_prompt_with_memory(question: str, *, ns: str = "default", top_k: int =
     hits = mem.recall(question, ns=ns, limit=top_k)
     if not hits:
         return f"问题：{question}"
-    lines = ["以下是 ZeroMem 本地记忆检索到的相关事实与绑定原文证据："]
-    for idx, h in enumerate(hits, 1):
-        when = f"记录于 {h.mentioned_at}" + (f" | 生效于 {h.occurred_start}" if h.occurred_start else "")
-        lines.append(f"{idx}. [{when}] 事实：{h.text}")
-        for ev in h.evidence:
-            lines.append(f"   原文({ev['id']}): {ev['text']}")
-    lines.append(f"\\n---\\n请仅依据上述记忆准确回答：{question}")
-    return "\\n".join(lines)
+    ctx = format_recall_context(hits)
+    return f"{ctx}\\n\\n---\\n请仅依据上述记忆准确回答：{question}"
 
 
 if __name__ == "__main__":

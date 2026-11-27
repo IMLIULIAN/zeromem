@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zeromem"
-version = "0.2.0"
+version = "0.2.1"
 description = "ZeroMem (零忆) by ZeroZoneX: zero-dependency local memory engine tailored for Qwen3.5-4B-Memory-V2"
 readme = "README.md"
 license = { text = "Apache-2.0" }

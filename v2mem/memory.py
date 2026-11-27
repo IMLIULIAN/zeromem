@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -12,21 +13,25 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import (
-    FACT_ADMISSION_SUPERSEDE_ADDENDUM,
     FACT_ADMISSION_SYSTEM,
     FACT_EXTRACTION_SYSTEM,
+    FACT_SUPERSESSION_SYSTEM,
     VALID_DECISIONS,
     Segment,
-    build_admission_supersede_schema,
+    _SUPERSESSION_STOPWORDS,
     build_segments,
+    build_supersession_schema,
     guard_fact,
+    has_supersession_cue,
+    is_evidence_verbatim_in_fact,
+    is_noop_revision,
     parse_json_object,
     window_segments,
 )
 from .expiry import ADAPTIVE_MIN_LIMIT, ADAPTIVE_SCORE_RATIO, resolve_default_limit
 from .ollama import DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL, OllamaClient
 from .portability import backup_database, export_markdown
-from .store import SQLiteMemoryStore
+from .store import SQLiteMemoryStore, tokenize_for_fts
 from .trace import RecallTracer, build_trace_record, resolve_trace_dir
 
 
@@ -97,6 +102,146 @@ class RecallHit:
             if data.get(opt_key) is None:
                 data.pop(opt_key, None)
         return data
+
+
+def _hit_to_mapping(hit: RecallHit | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(hit, RecallHit):
+        return hit.to_dict()
+    return dict(hit)
+
+
+def deduplicate_recall_evidence(
+    hits: list[RecallHit | dict[str, Any]],
+    *,
+    fold_verbatim: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Deduplicate shared (doc_id, seg_id) evidence segments across hits and optionally fold verbatim repeats.
+
+    Never mutates input RecallHit objects. Preserves segment IDs and speaker roles for full traceability.
+    """
+    seen_seg_first_hit: dict[tuple[str, str], int] = {}
+    deduped_items: list[dict[str, Any]] = []
+    shared_saved = 0
+    verbatim_folded = 0
+
+    for idx, hit in enumerate(hits, 1):
+        item = _hit_to_mapping(hit)
+        doc_id = str(item.get("doc_id") or "")
+        fact_text = str(item.get("text") or "")
+        raw_ev = item.get("evidence") or []
+        compact_ev: list[dict[str, Any]] = []
+
+        for ev in raw_ev:
+            if not isinstance(ev, dict):
+                continue
+            seg_id = str(ev.get("id") or "")
+            ev_text = str(ev.get("text") or "")
+            role = ev.get("role")
+            key = (doc_id, seg_id)
+
+            if key in seen_seg_first_hit:
+                ref_entry: dict[str, Any] = {
+                    "id": seg_id,
+                    "dedup_ref": f"#{seen_seg_first_hit[key]}:{doc_id}:{seg_id}" if doc_id else f"#{seen_seg_first_hit[key]}:{seg_id}",
+                }
+                if role:
+                    ref_entry["role"] = role
+                compact_ev.append(ref_entry)
+                shared_saved += 1
+                continue
+
+            seen_seg_first_hit[key] = idx
+            if fold_verbatim and is_evidence_verbatim_in_fact(fact_text, ev_text):
+                fold_entry: dict[str, Any] = {"id": seg_id, "same_as_fact": True}
+                if role:
+                    fold_entry["role"] = role
+                compact_ev.append(fold_entry)
+                verbatim_folded += 1
+                continue
+
+            kept: dict[str, Any] = {"id": seg_id, "text": ev_text}
+            if role:
+                kept["role"] = role
+            compact_ev.append(kept)
+
+        item["evidence"] = compact_ev
+        deduped_items.append(item)
+
+    stats = {
+        "shared_deduped": shared_saved,
+        "verbatim_folded": verbatim_folded,
+        "total_saved": shared_saved + verbatim_folded,
+    }
+    return deduped_items, stats
+
+
+def format_recall_context(
+    hits: list[RecallHit | dict[str, Any]],
+    *,
+    include_evidence: bool = True,
+    dedup_evidence: bool = True,
+    fold_verbatim: bool = True,
+    header: str | None = None,
+) -> str:
+    """Format recalled hits into a concise, traceable dual-track prompt block with evidence deduplication."""
+    if not hits:
+        return "本地记忆系统未检索到与该问题相关的历史记录。"
+
+    if header is None:
+        header = (
+            "以下是本地记忆系统检索到的最相关记忆（含去重原文证据）："
+            if include_evidence
+            else "以下是本地记忆系统检索到的最相关精炼事实（纯事实模式，不含展开原文）："
+        )
+
+    lines = [header]
+    seen_seg_first: dict[tuple[str, str], int] = {}
+
+    for idx, hit in enumerate(hits, 1):
+        item = _hit_to_mapping(hit)
+        t_parts = [f"记录于 {item.get('mentioned_at') or ''}"]
+        if item.get("occurred_start"):
+            t_parts.append(f"发生/生效于 {item['occurred_start']}")
+        if item.get("supersedes_fact_id") is not None:
+            t_parts.append(f"替代 #{item['supersedes_fact_id']}")
+        if item.get("superseded_by"):
+            t_parts.append("历史旧状态·已被新事实替代")
+        if isinstance(item.get("until_expiry"), dict) and item["until_expiry"].get("label"):
+            t_parts.append(str(item["until_expiry"]["label"]))
+
+        fact_text = str(item.get("text") or "")
+        lines.append(f"{idx}. [{' | '.join(t_parts)}] 事实：{fact_text}")
+
+        if not include_evidence:
+            continue
+
+        doc_id = str(item.get("doc_id") or "")
+        ref_tags: list[str] = []
+        for ev in item.get("evidence") or []:
+            if not isinstance(ev, dict):
+                continue
+            seg_id = str(ev.get("id") or "")
+            ev_text = str(ev.get("text") or "")
+            role = ev.get("role")
+            role_prefix = f"[{role}] " if role else ""
+            key = (doc_id, seg_id)
+
+            if dedup_evidence and key in seen_seg_first:
+                ref_tags.append(f"{seg_id}同#{seen_seg_first[key]}")
+                continue
+
+            seen_seg_first[key] = idx
+            if dedup_evidence and fold_verbatim and is_evidence_verbatim_in_fact(fact_text, ev_text):
+                role_note = f"·{role}" if role else ""
+                ref_tags.append(f"{seg_id}{role_note}同正文")
+                continue
+
+            lines.append(f"   原文({seg_id}): {role_prefix}{ev_text}")
+
+        if ref_tags:
+            lines.append(f"   证据引用: {', '.join(ref_tags)}")
+
+    return "\n".join(lines)
 
 
 class Memory:
@@ -174,25 +319,19 @@ class Memory:
                 continue
 
             if verify:
-                prior_facts = (
-                    self._find_prior_facts(namespace=namespace, candidates=candidates, max_items=6)
-                    if link_supersessions
-                    else []
-                )
                 reviewed = self._admit_window(
                     window=win,
                     candidates=candidates,
                     mentioned_at=ts,
                     namespace=namespace,
                     result=result,
-                    prior_facts=prior_facts,
                 )
             else:
                 reviewed = [{**c, "action": "bypass"} for c in candidates]
 
+            window_accepted: list[dict[str, Any]] = []
             for cand in reviewed:
                 action = str(cand.get("action") or "pass")
-                supersedes_fid = cand.get("supersedes_fact_id")
                 guarded, _ = guard_fact(cand, seg_map, mentioned_at=ts)
                 if not guarded:
                     result.guard_rejected += 1
@@ -202,9 +341,16 @@ class Memory:
                     continue
                 seen_fact_keys.add(dedup_key)
                 guarded["action"] = action
-                if isinstance(supersedes_fid, int) and not isinstance(supersedes_fid, bool) and supersedes_fid > 0:
-                    guarded["supersedes_fact_id"] = supersedes_fid
-                accepted_facts.append(guarded)
+                window_accepted.append(guarded)
+
+            if verify and link_supersessions and window_accepted:
+                self._link_supersessions_gated(
+                    namespace=namespace,
+                    accepted_facts=window_accepted,
+                    max_prior_items=4,
+                )
+
+            accepted_facts.extend(window_accepted)
 
         saved_ids = self.store.save_document_and_facts(
             doc_id=doc_id,
@@ -349,21 +495,48 @@ class Memory:
         facts = [f for f in parsed["facts"] if isinstance(f, dict)]
         return facts, str(meta.get("model") or "")
 
-    def _find_prior_facts(
+    @staticmethod
+    def _content_tokens(text: str) -> set[str]:
+        return {
+            t
+            for t in tokenize_for_fts(text).split()
+            if len(t) >= 2 and t not in _SUPERSESSION_STOPWORDS and not re.fullmatch(r"\d{1,2}", t)
+        }
+
+    @classmethod
+    def _is_gated_prior_match(cls, cand_text: str, prior_text: str) -> bool:
+        """Scale-invariant lexical overlap check excluding low-overlap hits and long boilerplate repeats."""
+        a = cls._content_tokens(cand_text)
+        b = cls._content_tokens(prior_text)
+        if not a or not b:
+            return False
+        inter = len(a & b)
+        jac = inter / max(1, len(a | b))
+        cont = inter / max(1, min(len(a), len(b)))
+        # Exclude near-identical long boilerplate repeats (e.g. routine checklists/minutes)
+        if min(len(a), len(b)) >= 20 and jac >= 0.58:
+            return False
+        return inter >= 2 and cont >= 0.22 and jac >= 0.11
+
+    def _find_gated_prior_facts(
         self,
         *,
         namespace: str,
-        candidates: list[dict[str, Any]],
-        max_items: int = 6,
-    ) -> list[dict[str, Any]]:
-        """Sub-millisecond same-namespace FTS5 lookup for active historical facts relevant to candidates."""
-        if not candidates or max_items <= 0:
-            return []
+        accepted_facts: list[dict[str, Any]],
+        max_items: int = 4,
+    ) -> tuple[list[int], list[dict[str, Any]]]:
+        """Gated same-namespace FTS5 lookup returning only cue-bearing fact indices and high-signal prior facts."""
+        if not accepted_facts or max_items <= 0:
+            return [], []
+        eligible_indices: list[int] = []
         collected: dict[int, tuple[float, dict[str, Any]]] = {}
-        for cand in candidates:
-            entities = cand.get("entities") if isinstance(cand.get("entities"), list) else []
+
+        for idx, fact in enumerate(accepted_facts):
+            text = str(fact.get("text") or "").strip()
+            if not has_supersession_cue(text):
+                continue
+            entities = fact.get("entities") if isinstance(fact.get("entities"), list) else []
             parts = [str(e).strip() for e in entities[:4] if str(e).strip()]
-            text = str(cand.get("text") or "").strip()
             if text:
                 parts.append(text[:120])
             query = " ".join(parts).strip()
@@ -379,9 +552,16 @@ class Memory:
                 )
             except Exception:
                 continue
+
+            matched_any = False
+            per_cand_added = 0
             for r in rows:
                 fid = int(r["fact_id"])
                 score = float(r.get("score") or 0.0)
+                if not self._is_gated_prior_match(text, str(r.get("text") or "")):
+                    continue
+                matched_any = True
+                per_cand_added += 1
                 prev = collected.get(fid)
                 if prev is None or score > prev[0]:
                     collected[fid] = (
@@ -394,22 +574,22 @@ class Memory:
                             "entities": list(r.get("entities") or [])[:6],
                         },
                     )
+                if per_cand_added >= 2:
+                    break
+            if matched_any:
+                eligible_indices.append(idx)
+
+        if not eligible_indices or not collected:
+            return [], []
         ranked = sorted(collected.values(), key=lambda pair: (-pair[0], pair[1]["fact_id"]))
-        return [item for _, item in ranked[:max_items]]
+        return eligible_indices, [item for _, item in ranked[:max_items]]
 
     @staticmethod
-    def _parse_supersedes_id(verdict: dict[str, Any], offered_prior_ids: set[int]) -> int | None:
-        if not offered_prior_ids:
+    def _parse_single_prior_id(raw: Any, offered_prior_ids: set[int]) -> int | None:
+        if not offered_prior_ids or raw is None or isinstance(raw, bool):
             return None
-        raw = verdict.get("supersedes_fact_id")
-        raw_candidates: list[Any] = []
-        if isinstance(raw, list):
-            raw_candidates.extend(raw)
-        elif raw is not None:
-            raw_candidates.append(raw)
-        elif isinstance(verdict.get("supersedes_fact_ids"), list):
-            raw_candidates.extend(verdict["supersedes_fact_ids"])
-        for val in raw_candidates:
+        candidates: list[Any] = list(raw) if isinstance(raw, list) else [raw]
+        for val in candidates:
             if isinstance(val, bool):
                 continue
             parsed: int | None = None
@@ -417,9 +597,79 @@ class Memory:
                 parsed = val
             elif isinstance(val, str) and val.strip().isdigit():
                 parsed = int(val.strip())
+            elif isinstance(val, dict) and "supersedes_fact_id" in val:
+                inner = val.get("supersedes_fact_id")
+                if isinstance(inner, int) and not isinstance(inner, bool):
+                    parsed = inner
+                elif isinstance(inner, str) and inner.strip().isdigit():
+                    parsed = int(inner.strip())
             if parsed is not None and parsed in offered_prior_ids:
                 return parsed
         return None
+
+    def _link_supersessions_gated(
+        self,
+        *,
+        namespace: str,
+        accepted_facts: list[dict[str, Any]],
+        max_prior_items: int = 4,
+    ) -> None:
+        """Gated post-admission supersession linker; never touches or pollutes native admission."""
+        eligible_indices, prior_facts = self._find_gated_prior_facts(
+            namespace=namespace,
+            accepted_facts=accepted_facts,
+            max_items=max_prior_items,
+        )
+        if not eligible_indices or not prior_facts:
+            return
+
+        offered_prior_ids = {int(pf["fact_id"]) for pf in prior_facts if isinstance(pf.get("fact_id"), int)}
+        if not offered_prior_ids:
+            return
+
+        new_facts_map: dict[str, dict[str, Any]] = {}
+        slot_keys: list[str] = []
+        for idx in eligible_indices:
+            slot = str(idx)
+            slot_keys.append(slot)
+            f = accepted_facts[idx]
+            new_facts_map[slot] = {
+                "text": str(f.get("text") or ""),
+                "occurred_start": f.get("occurred_start"),
+                "entities": list(f.get("entities") or [])[:6],
+            }
+
+        payload: dict[str, Any] = {
+            "new_facts": new_facts_map,
+            "prior_facts": prior_facts,
+        }
+        chat_kwargs: dict[str, Any] = {"num_predict": 128}
+        sup_schema = build_supersession_schema(slot_keys, sorted(offered_prior_ids))
+        try:
+            sig = inspect.signature(self.client.chat_json)
+            if "response_format" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                chat_kwargs["response_format"] = sup_schema
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            raw, _ = self.client.chat_json(FACT_SUPERSESSION_SYSTEM, payload, **chat_kwargs)
+        except Exception:
+            return
+
+        mapping = parse_json_object(raw)
+        if not mapping:
+            return
+
+        for idx in eligible_indices:
+            slot = str(idx)
+            if slot not in mapping:
+                continue
+            sup_id = self._parse_single_prior_id(mapping.get(slot), offered_prior_ids)
+            if sup_id is not None:
+                accepted_facts[idx]["supersedes_fact_id"] = sup_id
 
     def _admit_window(
         self,
@@ -429,9 +679,8 @@ class Memory:
         mentioned_at: str,
         namespace: str,
         result: RememberResult,
-        prior_facts: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Bounded single-round admission: pass/revise directly, optional supersedes_fact_id, isolate drop/hold."""
+        """Pure native single-round admission (3-field contract): pass/revise directly, isolate drop/hold/noop-revise."""
         facts_map: dict[str, dict[str, Any]] = {}
         for idx, cand in enumerate(candidates):
             facts_map[str(idx)] = {
@@ -450,32 +699,11 @@ class Memory:
             "evidence": [s.to_payload() for s in window],
             "facts": facts_map,
         }
-        offered_prior_ids: set[int] = set()
-        admit_schema: dict[str, Any] | None = None
-        if prior_facts:
-            payload["prior_facts"] = prior_facts
-            offered_prior_ids = {int(pf["fact_id"]) for pf in prior_facts if isinstance(pf.get("fact_id"), int)}
-            system_prompt = f"{FACT_ADMISSION_SYSTEM} {FACT_ADMISSION_SUPERSEDE_ADDENDUM}"
-            if offered_prior_ids:
-                admit_schema = build_admission_supersede_schema(len(candidates), sorted(offered_prior_ids))
-        else:
-            system_prompt = FACT_ADMISSION_SYSTEM
-
-        chat_kwargs: dict[str, Any] = {"num_predict": 768}
-        if admit_schema is not None:
-            try:
-                sig = inspect.signature(self.client.chat_json)
-                if "response_format" in sig.parameters or any(
-                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-                ):
-                    chat_kwargs["response_format"] = admit_schema
-            except (TypeError, ValueError):
-                pass
 
         raw, _ = self.client.chat_json(
-            system_prompt,
+            FACT_ADMISSION_SYSTEM,
             payload,
-            **chat_kwargs,
+            num_predict=768,
         )
         verdicts = parse_json_object(raw)
         if not verdicts:
@@ -494,22 +722,16 @@ class Memory:
 
             ev_override = verdict.get("evidence")
             ev = ev_override if isinstance(ev_override, list) and ev_override else cand.get("evidence")
-            supersedes_id = self._parse_supersedes_id(verdict, offered_prior_ids)
 
             if decision == "pass":
-                entry = {**cand, "evidence": ev, "action": "pass"}
-                if supersedes_id is not None:
-                    entry["supersedes_fact_id"] = supersedes_id
-                approved.append(entry)
+                approved.append({**cand, "evidence": ev, "action": "pass"})
             elif decision == "revise":
                 replacement = str(verdict.get("replacement") or "").strip()
-                if replacement:
+                if replacement and not is_noop_revision(str(cand.get("text") or ""), replacement):
                     result.revised += 1
-                    entry = {**cand, "text": replacement, "evidence": ev, "action": "revise"}
-                    if supersedes_id is not None:
-                        entry["supersedes_fact_id"] = supersedes_id
-                    approved.append(entry)
+                    approved.append({**cand, "text": replacement, "evidence": ev, "action": "revise"})
                 else:
+                    # Intercept empty or no-op revise (replacement identical to rejected original text)
                     result.held += 1
             elif decision == "drop":
                 result.dropped += 1

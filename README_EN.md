@@ -33,6 +33,25 @@ Evaluated on **71 synthetic engineering documents (51,947 chars / 385 extracted 
 
 ![ZeroMem 15k vs 52k Corpus Scaling Benchmark](docs/images/zeromem_scaling_15k_vs_50k_en.png)
 
+### 52k-Char Ablation Ladder & v0.2.1 Engine Fixes (`L0 -> L3 -> L3-FIX`)
+
+On the same 71-document corpus (51,947 chars) × 12 questions, identical `tokenize_for_fts` FTS5 engine (fixed Top-6), and live `deepseek-flash`, we ran a single-variable ablation ladder from raw-segment FTS5 (`L0`) through 4B extraction (`L1`), 1-round native admission (`L2`), v0.2.0 in-admission `prior_facts` (`L3`), and **v0.2.1 upgraded ZeroMem (`L3-FIX`: pure native 3-field admission + gated standalone supersession + no-op `revise` guard + recall evidence dedup/folding)**, plus a full-database dual-layer audit (deterministic rules ∪ independent cloud judge across all 560 unique stored facts):
+
+| Ablation Tier | Top-1 Hit (10 Answerable Qs) | Accuracy (12 Qs) | Rule Defect Rate | Combined Fact Error (Rule ∪ Judge) | Avg Context Chars | Avg Input Tokens (11 Single-Step / 12-Q) | Plaintext Secrets (DB / Cloud) | Local Write Time (LLM Calls) | Avg Search |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **L0: Raw Segment FTS5 (0 LLM)** | 10/10 (100%) | 11/12 (91.7%) | N/A | N/A | 797.7 | 1,156.9 / 1,149.9 (-96.4% vs B) | DB 2 / Cloud 8 ⚠️ | 0.015s (0) | 3.02ms |
+| **L1: +4B Extract (No Admit/Guard)** | 10/10 (100%) | 11/12 (91.7%) | 1.34% (5/373) | 9.65% (36/373) | 2,635.7 | 1,886.0 / 1,925.3 (-93.9% vs B) | DB 4 / Cloud 8 ⚠️ | 558.19s (71) | 6.47ms |
+| **L2: +1-Round Native Admit** | 9/10 (90%) | 11/12 (91.7%) | 0.54% (2/370) | 7.03% (26/370) | 2,275.7 | 1,722.6 / 1,747.3 (-94.5% vs B) | DB 4 / Cloud 8 ⚠️ | 692.39s (142) | 4.99ms |
+| **L3: ZeroMem v0.2.0 (Before Fix)** | 9/10 (90%) | 11/12 (91.7%) | 1.07% (4/373) | 8.31% (31/373) | 2,313.4 | 1,742.1 / 1,777.9 (-94.4% vs B) | **DB 0 / Cloud 0** ✅ | 751.59s (142) | 4.63ms |
+| **L3-FIX: ZeroMem v0.2.1 (Upgraded)** | **10/10 (100%)** | **11/12 (91.7%)** | **0.00% (0/368)** | **6.79% (25/368)** | **1,919.6 (-17.0%)** | **1,499.5 (-13.9%) / 1,720.2 (-94.6% vs B)** | **DB 0 / Cloud 0** ✅ | 853.09s (147, gated 5) | **3.73ms** |
+| **L3-FIX-FO: Facts-Only (Same DB)** | **10/10 (100%)** | **11/12 (91.7%)** | **0.00% (0/368)** | **6.79% (25/368)** | 1,407.1 | 1,233.3 / 1,349.3 (-95.7% vs B) | **DB 0 / Cloud 0** ✅ | Reuses L3-FIX | 4.03ms |
+
+> **Verified Takeaways & Honest Boundaries**:
+> - **v0.2.1 Engine Fixes Verified**: Restoring `_admit_window` to the pure native 3-field contract, holding no-op `revise` echoes, and isolating supersession into a gated standalone pass (triggered on only 5/71 docs) drove deterministic rule defects to **0.00%**, eliminated prior template leaks (`4/6 -> 0/0` across rule & judge), cut full-DB combined error rate to **6.79%** (`-29.6%` vs L1, surpassing L2), reduced supersession false positives by `-83.3%` while linking the core architectural reversal (`sig_05 -> sig_02`, lifting Top-1 hit rate from `9/10` to **10/10**). Recall evidence deduplication & verbatim folding shrank context characters on **12/12** questions (`-17.0%` avg) and cut single-step cloud input tokens by `-13.9%` (note: both 11 single-step and 12-Q means are reported because `deepseek-flash` performed a spontaneous 2-step verification on unanswerable `Q10`).
+> - **Honest Positioning**: For static single-topic FTS5 search alone, raw-segment `L0` already scores 11/12 at `1,150 tok/Q`. ZeroMem's real edge lies in **¥0 cloud write cost, zero cloud secret leaks (`8 -> 0`), structured event-date grounding, timeline supersession ranking, and autonomous MCP cross-doc decomposition (`12/12`)**. Dual-track tokens still sit slightly above `L0` mainly because `Qwen3.5-4B-Memory-V2` often expands Chinese notes into longer English facts (~`2.35×` char expansion), which is the primary target for the next-generation 4B SFT run.
+
+![ZeroMem 52k-Char Ablation Ladder & v0.2.1 Fixes](docs/images/zeromem_ablation_50k_en.png)
+
 ---
 
 ## Native Dark Desktop Workbench (No Web Server, Zero Dependencies)
@@ -210,10 +229,10 @@ Environment variable overrides: `ZEROMEM_DB`, `ZEROMEM_MODEL`, `ZEROMEM_OLLAMA_U
 General-purpose memory frameworks are typically built around larger cloud models and vector databases, which does not always align well with a specialized 4B model's context limits and output schema. ZeroMem keeps the pipeline small with **5 practical design choices** tailored to V2:
 
 1. **Short-Window Micro-Chunking (`< 1,500` chars + `s0..sN` evidence IDs)**: Splits long inputs into small overlapping windows to reduce missed facts on a 4B model.
-2. **Native Dual-Contract Single-Round Loop (`Extract → Admit`)**: Matches V2's trained `fact-extraction-v1` and `fact-admission-v1` contracts; `revise` replacements are accepted in one pass (avoiding retry loops), while `drop`/`hold` isolates bad items individually.
-3. **Deterministic Guardrails**: Validates evidence IDs, repairs truncated 64-char SHA-256 hashes against bound source text, separates record date (`mentioned_at`) from event date (`occurred_start`), and redacts common secret patterns to `[REDACTED]`.
+2. **Pure Native Dual-Contract + Gated Standalone Supersession (`Extract -> Native Admit -> Gated Supersession`)**: Keeps `fact-extraction-v1` and 3-field `fact-admission-v1` 100% pure (zero OOD schema pollution), routes empty/unchanged no-op `revise` echoes into `hold`, and invokes a lightweight standalone supersession check (`num_predict=128`) only on admitted facts with explicit state-change/migration cues that pass boilerplate-echo filtering.
+3. **Deterministic Guardrails**: Validates evidence IDs, repairs truncated 64-char SHA-256 hashes against bound source text, separates record date (`mentioned_at`) from event date (`occurred_start`, with conservative single-date backfill), and redacts common secret patterns to `[REDACTED]`.
 4. **Conservative Sampling & Truncation Salvage**: Disables thinking, fixes `temperature=0`, `presence_penalty=0`, `repeat_penalty=1.08`, bounded `num_predict`, and salvages completed facts if output JSON is truncated.
-5. **Dual-Track FTS5 (Facts + Bound Evidence)**: Indexes extracted facts, entities, and bound source segments with CJK 2-gram + alphanumeric tokenization — enabling bilingual search and source attribution without an embedding model.
+5. **Dual-Track FTS5 + Evidence Dedup & Folding**: Indexes extracted facts, entities, and bound source segments with CJK 2-gram + alphanumeric tokenization; keeps underlying `RecallHit.evidence` lossless while deduplicating shared `(doc_id, seg_id)` segments and folding verbatim-contained segments into compact citations in SDK (`format_recall_context`), MCP, and CLI rendering.
 
 ---
 
@@ -226,14 +245,15 @@ zeromem/
 ├── pyproject.toml          # Zero-dependency package config (zmem / zmem-hud + v2mem aliases)
 ├── README.md               # Chinese README (简体中文)
 ├── README_EN.md            # English README
+├── CHANGELOG.md            # Release changelog
 ├── zeromem/                # Public package alias & module entry (python -m zeromem)
 ├── v2mem/                  # Core engine implementation (backward-compatible)
-│   ├── contracts.py        # Native V2 dual contracts, micro-chunker, guardrails & salvage parser
+│   ├── contracts.py        # Pure native dual contracts, gated supersession contract, no-op revise guard & salvage parser
 │   ├── hardware.py         # Pure-stdlib OS / GPU VRAM / Apple Silicon probe & quant selector
 │   ├── connectors.py       # Auto-discovery, backup & reversible connect/disconnect for 7 Agents
 │   ├── ollama.py           # Stdlib Ollama client, sampling options & SHA-256 weight bootstrap
 │   ├── store.py            # Single-file SQLite WAL + dual-track FTS5 + fact_supersessions timeline edges
-│   ├── memory.py           # remember() (with prior-fact recall & supersession tagging) / recall() (time-range filtering)
+│   ├── memory.py           # remember() (pure admission + gated supersession) / recall() (time-range + evidence dedup/folding)
 │   ├── expiry.py           # Strict until:YYYY-MM-DD expiry demotion, adaptive 2-8 gating & occurred range helpers
 │   ├── governance.py       # Fail-closed retraction ledger & lossless soft-eviction / SHA-256 restore
 │   ├── portability.py      # 100% read-only Markdown export (Obsidian/Git) & SQLite Online Backup snapshots
@@ -242,7 +262,7 @@ zeromem/
 │   ├── mcp_server.py       # Zero-dep 4-tool MCP stdio server (NDJSON + Content-Length)
 │   ├── hud.py              # Native dark tkinter floating status pill & memory workbench
 │   └── cli.py              # setup / connect / disconnect / doctor / config / add / search / export / backup / stats / mcp / ui
-├── docs/images/            # Controlled 52k benchmark charts (ZH/EN) & native workbench screenshots
+├── docs/images/            # Controlled 52k benchmark & ablation charts (ZH/EN) & native workbench screenshots
 ├── modelfiles/             # Official Q8_0 / Q4_K_M Ollama Modelfiles
 ├── demo.py                 # Synthetic isolated end-to-end demo
 └── tests/                  # Offline unit tests + live V2 smoke test + cloud E2E suite

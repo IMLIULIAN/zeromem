@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from .memory import Memory
+from .memory import Memory, deduplicate_recall_evidence
 
 TOOLS_SPEC = [
     {
@@ -157,7 +157,7 @@ class MCPStdioServer:
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {
                         "name": "zeromem",
-                        "version": "0.2.0",
+                        "version": "0.2.1",
                     },
                     "instructions": (
                         "ZeroMem (零忆) local evidence-grounded memory powered by Qwen3.5-4B-Memory-V2. "
@@ -208,10 +208,13 @@ class MCPStdioServer:
                     trace_channel="zeromem_mcp",
                 )
                 expired_count = sum(1 for h in hits if h.until_expiry)
+                deduped_items, dedup_stats = deduplicate_recall_evidence(hits, fold_verbatim=True)
                 payload: dict[str, Any] = {
-                    "count": len(hits),
-                    "items": [h.to_dict() for h in hits],
+                    "count": len(deduped_items),
+                    "items": deduped_items,
                 }
+                if dedup_stats["total_saved"] > 0:
+                    payload["evidence_dedup_saved"] = dedup_stats["total_saved"]
                 if expired_count > 0:
                     payload["expired_count"] = expired_count
                 return self._tool_text(req_id, payload)

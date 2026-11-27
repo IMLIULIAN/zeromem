@@ -15,9 +15,21 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from v2mem import Memory, backup_database, export_markdown
+from v2mem import (
+    Memory,
+    backup_database,
+    deduplicate_recall_evidence,
+    export_markdown,
+    format_recall_context,
+)
 from v2mem.cli import build_parser, main as cli_main
-from v2mem.contracts import FACT_ADMISSION_SUPERSEDE_ADDENDUM, FACT_ADMISSION_SYSTEM, Segment
+from v2mem.contracts import (
+    FACT_ADMISSION_SYSTEM,
+    FACT_SUPERSESSION_SYSTEM,
+    Segment,
+    has_supersession_cue,
+    is_noop_revision,
+)
 from v2mem.governance import restore_evicted, soft_evict
 from v2mem.mcp_server import MCPStdioServer
 from v2mem.store import APP_FORMAT_ID, SCHEMA_SIG, SQLiteMemoryStore
@@ -73,8 +85,8 @@ class TestTimelineAndPortability(unittest.TestCase):
         )
         adm1 = json.dumps({"0": {"decision": "pass", "evidence": ["s0"], "replacement": ""}})
 
-        # Doc 2: 2026 migration -> admission receives prior_facts with fact_id=1 and marks supersedes_fact_id=1
-        # Also test a second candidate returning a fabricated supersedes_fact_id=9999 -> must be stripped!
+        # Doc 2: 2026 migration -> admission stays 100% pure native 3-field contract;
+        # gated post-admission supersession call runs ONLY for slot 0 ("迁移至") against prior_facts=[#1]
         ext2 = json.dumps(
             {
                 "facts": [
@@ -102,27 +114,18 @@ class TestTimelineAndPortability(unittest.TestCase):
         )
         adm2 = json.dumps(
             {
-                "0": {
-                    "decision": "pass",
-                    "evidence": ["s0"],
-                    "replacement": "",
-                    "supersedes_fact_id": 1,
-                },
-                "1": {
-                    "decision": "pass",
-                    "evidence": ["s1"],
-                    "replacement": "",
-                    "supersedes_fact_id": 9999,  # hallucinated ID not in prior_facts -> stripped
-                },
+                "0": {"decision": "pass", "evidence": ["s0"], "replacement": ""},
+                "1": {"decision": "pass", "evidence": ["s1"], "replacement": ""},
             }
         )
+        sup2 = json.dumps({"0": 1, "1": 9999})  # slot 1 wasn't even gated; fabricated ID 9999 must be ignored
 
-        # Doc 3 in a DIFFERENT namespace -> must NOT see proj-a's facts in prior_facts
+        # Doc 3 in a DIFFERENT namespace -> must NOT see proj-a's facts or trigger supersession call
         ext3 = json.dumps(
             {
                 "facts": [
                     {
-                        "text": "项目 A 演示环境使用方案 Z。",
+                        "text": "项目 A 演示环境从方案 X 切换至方案 Z。",
                         "type": "world",
                         "occurred_start": "2026-04-01",
                         "occurred_end": None,
@@ -138,7 +141,7 @@ class TestTimelineAndPortability(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "timeline.db"
-            mock = ScriptedClient([ext1, adm1, ext2, adm2, ext3, adm3])
+            mock = ScriptedClient([ext1, adm1, ext2, adm2, sup2, ext3, adm3])
             mem = Memory(db_path=db, client=mock)
 
             r1 = mem.remember(
@@ -149,7 +152,8 @@ class TestTimelineAndPortability(unittest.TestCase):
             self.assertEqual(r1.saved, 1)
             self.assertEqual(r1.superseded, 0)
             old_fid = r1.fact_ids[0]
-            # First admission had no prior facts -> exact unmodified legacy prompt, payload & no forced schema
+            # First admission had no prior facts -> exact unmodified native prompt, payload & no forced schema
+            self.assertEqual(len(mock.calls), 2)
             self.assertEqual(mock.calls[1]["system_prompt"], FACT_ADMISSION_SYSTEM)
             self.assertNotIn("prior_facts", mock.calls[1]["user_payload"])
             self.assertIsNone(mock.calls[1]["response_format"])
@@ -163,19 +167,27 @@ class TestTimelineAndPortability(unittest.TestCase):
             self.assertEqual(r2.superseded, 1)
             new_fid, log_fid = r2.fact_ids[0], r2.fact_ids[1]
 
-            # Second admission received prior_facts with old_fid, addendum prompt, and constrained JSON schema
-            self.assertIn(FACT_ADMISSION_SUPERSEDE_ADDENDUM, mock.calls[3]["system_prompt"])
-            prior_ids = [pf["fact_id"] for pf in mock.calls[3]["user_payload"]["prior_facts"]]
+            # Doc 2 admission (call 3) stays 100% pure native contract (no prior_facts, no schema pollution)
+            self.assertEqual(mock.calls[3]["system_prompt"], FACT_ADMISSION_SYSTEM)
+            self.assertNotIn("prior_facts", mock.calls[3]["user_payload"])
+            self.assertIsNone(mock.calls[3]["response_format"])
+
+            # Separate lightweight gated supersession call (call 4) checks ONLY slot "0" against old_fid
+            self.assertEqual(mock.calls[4]["system_prompt"], FACT_SUPERSESSION_SYSTEM)
+            self.assertEqual(list(mock.calls[4]["user_payload"]["new_facts"].keys()), ["0"])
+            prior_ids = [pf["fact_id"] for pf in mock.calls[4]["user_payload"]["prior_facts"]]
             self.assertIn(old_fid, prior_ids)
-            schema = mock.calls[3]["response_format"]
+            schema = mock.calls[4]["response_format"]
             assert isinstance(schema, dict)
-            self.assertEqual(schema["properties"]["0"]["properties"]["supersedes_fact_id"]["enum"], [None, old_fid])
+            self.assertEqual(schema["properties"]["0"]["enum"], [None, old_fid])
             self.assertEqual(r2.facts[0].get("supersedes_fact_id"), old_fid)
             self.assertNotIn("supersedes_fact_id", r2.facts[1])
 
-            # Cross-namespace isolation: proj-b admission sees no prior_facts from proj-a
-            mem.remember("2026-04-01：项目 A 演示环境使用方案 Z。", ns="proj-b")
-            self.assertNotIn("prior_facts", mock.calls[5]["user_payload"])
+            # Cross-namespace isolation: proj-b runs strictly 2 calls (extract + pure admit), 0 supersession call
+            mem.remember("2026-04-01：项目 A 演示环境从方案 X 切换至方案 Z。", ns="proj-b")
+            self.assertEqual(len(mock.calls), 7)
+            self.assertEqual(mock.calls[6]["system_prompt"], FACT_ADMISSION_SYSTEM)
+            self.assertNotIn("prior_facts", mock.calls[6]["user_payload"])
 
             # Recall ranks current non-superseded facts ahead of superseded historical fact
             hits = mem.recall("项目 A 方案", ns="proj-a", adaptive=False, limit=10)
@@ -598,6 +610,161 @@ class TestTimelineAndPortability(unittest.TestCase):
                 ):
                     parsed = parser.parse_args(argv)
                     self.assertTrue(parsed.command)
+
+    def test_noop_revise_intercepted_and_boilerplate_gating_skipped(self) -> None:
+        self.assertTrue(is_noop_revision("User authorized project v1.", "User authorized project v1."))
+        self.assertTrue(is_noop_revision("User authorized project v1. | Involving: user", "user authorized   project v1."))
+        self.assertFalse(is_noop_revision("Pool limit is 500.", "Pool limit is 200."))
+        self.assertTrue(has_supersession_cue("支付回调超时阈值正式调整为 15 秒。"))
+        self.assertFalse(has_supersession_cue("运维团队每周日凌晨 03:00 执行冷备归档。"))
+
+        ext1 = json.dumps(
+            {
+                "facts": [
+                    {
+                        "text": "Checklist confirms text contrast, icon clarity, and control spacing across desktop resolutions and dark/light themes without runtime changes.",
+                        "type": "world",
+                        "entities": ["checklist"],
+                        "evidence": ["s0"],
+                    }
+                ]
+            }
+        )
+        adm1 = json.dumps({"0": {"decision": "pass", "evidence": ["s0"], "replacement": ""}})
+
+        # Doc 2 has: (0) a no-op revise repeating polluted text identically -> MUST be intercepted as held;
+        # (1) a genuine revise changing 500 -> 200 -> MUST pass as revised;
+        # (2) a routine additive fact with no supersession cue -> MUST NOT trigger any extra LLM call!
+        ext2 = json.dumps(
+            {
+                "facts": [
+                    {
+                        "text": "User authorized project execution for version 1.0.0.",
+                        "type": "world",
+                        "entities": [],
+                        "evidence": ["s0"],
+                    },
+                    {
+                        "text": "主库连接池上限 500。",
+                        "type": "world",
+                        "entities": ["主库"],
+                        "evidence": ["s0"],
+                    },
+                    {
+                        "text": "每周日凌晨执行一次只读日志巡检。",
+                        "type": "world",
+                        "entities": ["日志"],
+                        "evidence": ["s0"],
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        )
+        adm2 = json.dumps(
+            {
+                "0": {
+                    "decision": "revise",
+                    "evidence": ["s0"],
+                    "replacement": "User authorized project execution for version 1.0.0. | Involving: user",
+                },
+                "1": {
+                    "decision": "revise",
+                    "evidence": ["s0"],
+                    "replacement": "主库连接池上限 200。",
+                },
+                "2": {"decision": "pass", "evidence": ["s0"], "replacement": ""},
+            },
+            ensure_ascii=False,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            mock = ScriptedClient([ext1, adm1, ext2, adm2])
+            mem = Memory(db_path=Path(td) / "gate.db", client=mock)
+            mem.remember("核对清单：确认亮暗色主题文字对比度与图标清晰度。", ns="ops")
+            r2 = mem.remember("主库连接池上限 200，每周日凌晨执行只读日志巡检。", ns="ops")
+            # Strictly 2 + 2 = 4 calls total (zero extra supersession call triggered!)
+            self.assertEqual(len(mock.calls), 4)
+            self.assertEqual(r2.saved, 2)
+            self.assertEqual(r2.revised, 1)
+            self.assertEqual(r2.held, 1)
+            self.assertTrue(all("User authorized" not in f["text"] for f in r2.facts))
+
+    def test_recall_evidence_dedup_and_verbatim_folding(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "dedup.db"
+            store = SQLiteMemoryStore(db)
+            shared_seg = "2026-03-05 数据库配置确认：主库连接池上限 200，只读副本连接池上限 500。"
+            verbatim_seg = "2026-03-01 记录：网关公开查询接口限流为每分钟 120 次。"
+            store.save_document_and_facts(
+                doc_id="doc-shared",
+                namespace="eng",
+                content_sha256="e" * 64,
+                source_id="db.md",
+                mentioned_at="2026-03-05T08:00:00Z",
+                created_at="2026-03-05T08:00:00Z",
+                segments=[
+                    Segment(id="s0", path=["note", "0"], text=shared_seg, role="user"),
+                    Segment(id="s1", path=["note", "1"], text=verbatim_seg),
+                ],
+                facts=[
+                    {
+                        "text": "主库连接池上限设置为 200。",
+                        "type": "world",
+                        "entities": ["主库"],
+                        "evidence": ["s0"],
+                        "action": "pass",
+                    },
+                    {
+                        "text": "只读副本连接池上限设置为 500。",
+                        "type": "world",
+                        "entities": ["只读副本"],
+                        "evidence": ["s0"],
+                        "action": "pass",
+                    },
+                    {
+                        "text": verbatim_seg,
+                        "type": "world",
+                        "entities": ["网关"],
+                        "evidence": ["s1"],
+                        "action": "pass",
+                    },
+                ],
+            )
+            mem = Memory(db_path=db)
+            hits = mem.recall("", ns="eng", limit=5, adaptive=False)
+            self.assertEqual(len(hits), 3)
+
+            # Deduplication never mutates original RecallHit objects
+            deduped, stats = deduplicate_recall_evidence(hits, fold_verbatim=True)
+            self.assertEqual(stats["shared_deduped"], 1)
+            self.assertEqual(stats["verbatim_folded"], 1)
+            self.assertEqual(stats["total_saved"], 2)
+            # Raw hits still hold full evidence text intact
+            self.assertEqual(sum(len(h.evidence[0]["text"]) > 0 for h in hits), 3)
+
+            # Context formatter omits duplicated shared segment & verbatim segment while preserving citations
+            ctx = format_recall_context(hits)
+            self.assertEqual(ctx.count(shared_seg), 1)
+            self.assertEqual(ctx.count(verbatim_seg), 1)
+            self.assertIn("s0同#", ctx)
+            self.assertIn("s1同正文", ctx)
+
+            # MCP memory_recall emits deduplicated evidence payload with evidence_dedup_saved count
+            srv = MCPStdioServer(mem)
+            resp = srv.handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "memory_recall", "arguments": {"query": "", "namespace": "eng", "limit": 5, "adaptive": False}},
+                }
+            )
+            assert resp is not None
+            body = json.loads(resp["result"]["content"][0]["text"])
+            self.assertEqual(body["evidence_dedup_saved"], 2)
+            ev_entries = [ev for it in body["items"] for ev in it["evidence"]]
+            self.assertTrue(any("dedup_ref" in e and "text" not in e for e in ev_entries))
+            self.assertTrue(any(e.get("same_as_fact") is True and "text" not in e for e in ev_entries))
 
 
 if __name__ == "__main__":
